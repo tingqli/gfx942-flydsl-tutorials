@@ -22,20 +22,26 @@ CASES = {
     "v0_64x64": lambda: build_v0(64, 64, 1, M, N, K),
     "v0_128x128": lambda: build_v0(128, 128, 1, M, N, K),
     "v1": lambda: build_v1(256, 256, 1, M, N, K),
+    "v1_flyswz": lambda: build_v1(256, 256, 1, M, N, K, SWIZZLE="fly"),
     "v2_nosched": lambda: build_v2(256, 256, 1, M, N, K, SCHED=False),
     "v2": lambda: build_v2(256, 256, 1, M, N, K),
 }
 
 
-def timeit(fn, iters=20, warmup=5):
+def timeit(fn, *args, iters=50, warmup=5):
     for _ in range(warmup):
-        fn()
+        fn(*args)
+    
+    replicate_args = []
+    for i in range(iters):
+        replicate_args.append([a.clone() if isinstance(a, torch.Tensor) else a for a in args])
+
     torch.cuda.synchronize()
     ts = []
-    for _ in range(iters):
+    for i in range(iters):
         s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         s.record()
-        fn()
+        fn(*replicate_args[i])
         e.record()
         torch.cuda.synchronize()
         ts.append(s.elapsed_time(e) * 1e3)

@@ -1,4 +1,36 @@
 
+# LDS swizzle 的两种写法（编译期开关 build_v1(..., SWIZZLE="manual" | "fly")）
+#
+# LDS 按 [行][8 个 16B chunk] 存放，一行 64 个 bf16 = 128B = 正好 32 个 bank。
+# swizzle 规则：物理 chunk = 逻辑 chunk ^ (row % 8)，使 ds_read_b128 一拍的 8 个 lane
+# （8 行同一 chunk）和 ds_write_b128 一拍的 8 个 lane（1 行 8 个 chunk）都铺满 32 个 bank。
+#
+# - "manual"（默认）：手写 c ^ (r % 8)，在普通 LDS 视图上直接 load()/store()。
+# - "fly"：FlyDSL 内置 Swizzle：
+#       swz = fx.static(fx.SwizzleType.get(3, 3, 3))
+#       layout = fx.make_composed_layout(swz, fx.make_ordered_layout((8, 8, BM), 0))
+#   元素偏移 = e + 8*chunk + 64*row，Swizzle(B=3, M=3, S=3) 把偏移的 bit[6,9)（row%8）
+#   XOR 到 bit[3,6)（chunk），映射与手写完全相同，调用方直接用逻辑 chunk 号。
+#   注意：FlyDSL 0.3.2 不支持在 composed layout 视图上做向量 load/store
+#   （MemRefLoadVecOp: MemRefType with ComposedLayout is not supported），
+#   所以只用它算地址：fx.crd2idx((0, c, r), layout) 得到 swizzle 后的偏移，
+#   再在该地址上建一个连续 8 元素的普通视图做 load()/store()。
+#
+# 实测（8192x9728x8192，空闲 MI325X）：
+#                                      manual        fly
+#   正确性                              ✓             ✓
+#   LDS 指令                            16 ds_write_b128 + 32 ds_read_b128（两者相同）
+#   SQ_LDS_BANK_CONFLICT                0             0
+#   循环内 v_xor                        0             0（都被提到循环外）
+#   带立即数偏移的 ds_read_b128          26            0
+#   VGPR                                436           464
+#   TFLOPS                              438.0         438.9
+#
+# 区别在寄存器：手写版的 XOR 只作用在 chunk 号上，同一 lane 各行 row%8 相同，XOR 结果
+# 不变，行间差距可写成 ds_read 的立即数 offset，共用一个地址寄存器；内置 swizzle
+# 对整个偏移做 XOR，XOR 与加法不可交换，编译器只能为每次读取单独准备地址寄存器
+# （+28 VGPR）。v1 寄存器有余量所以无影响；v2 寄存器已用满，保持手写更稳妥。
+
 import torch
 import math
 
@@ -11,9 +43,12 @@ from flydsl.expr.typing import Vector as Vec
 
 
 
-def build_v1(BM, BN, OCCUPANCY, M, N, K):
+def build_v1(BM, BN, OCCUPANCY, M, N, K, SWIZZLE="manual"):
     # CTA computes BMxBN of C with 4 waves in a 2x2 grid, each wave WMxWN.
     # Per K step (BK=64) the CTA stages A[BM, 64] / B[BN, 64] bf16 in LDS.
+    # SWIZZLE (compile time): "manual" = XOR the chunk index by hand,
+    #                         "fly"    = FlyDSL Swizzle(3,3,3) composed layout.
+    assert SWIZZLE in ("manual", "fly")
     BK = 64
     WM, WN = BM // 2, BN // 2
     NI, NJ = WM // 16, WN // 16
@@ -49,12 +84,29 @@ def build_v1(BM, BN, OCCUPANCY, M, N, K):
         # lanes of a ds_read_b128 phase (8 rows, same chunk) and of a
         # ds_write_b128 phase (1 row, 8 chunks) both hit all 32 banks.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        lds_a = lds.a.view(fx.make_ordered_layout((8, 8, BM), 0))
-        lds_b = lds.b.view(fx.make_ordered_layout((8, 8, BN), 0))
+        if const_expr(SWIZZLE == "fly"):
+            # element offset = e + 8*chunk + 64*row; Swizzle(B=3, M=3, S=3) xors
+            # offset bits [6,9) (row % 8) into bits [3,6) (chunk): the same mapping,
+            # done by the layout. Vector load/store on a composed view is not
+            # supported, so the composed layout only produces the (swizzled)
+            # offset of each 16 B chunk; the chunk itself is a plain 8-elem view.
+            swz = fx.static(fx.SwizzleType.get(3, 3, 3))
+            lds_a = (lds.a.ptr, fx.make_composed_layout(swz, fx.make_ordered_layout((8, 8, BM), 0)))
+            lds_b = (lds.b.ptr, fx.make_composed_layout(swz, fx.make_ordered_layout((8, 8, BN), 0)))
+        else:
+            lds_a = lds.a.view(fx.make_ordered_layout((8, 8, BM), 0))
+            lds_b = lds.b.view(fx.make_ordered_layout((8, 8, BN), 0))
+
+        def lds_chunk(L, c, r):
+            """8-element (16 B) LDS view holding logical chunk c of row r"""
+            if const_expr(SWIZZLE == "fly"):
+                ptr, layout = L
+                return fx.make_view(fx.add_offset(ptr, fx.crd2idx((0, c, r), layout)),
+                                    fx.make_layout(8, 1))
+            return L[None, c ^ (r % 8), r]
 
         # staging coordinates (global -> LDS)
         st_c, st_r = tid % 8, tid // 8
-        st_c_sw = st_c ^ (st_r % 8)          # (p*32 + st_r) % 8 == st_r % 8
 
         # MFMA 16x16x16 operand layout: lane l feeds row (l % 16) and a 4-element K
         # group selected by (l // 16). Each lane reads 8 contiguous K (16 bytes) and
@@ -75,16 +127,15 @@ def build_v1(BM, BN, OCCUPANCY, M, N, K):
             #    the previous tile)
             gpu.barrier()
             for p in range_constexpr(BM//32):
-                lds_a[None, st_c_sw, p * 32 + st_r].store(a_st[p])
+                lds_chunk(lds_a, st_c, p * 32 + st_r).store(a_st[p])
             for p in range_constexpr(BN//32):
-                lds_b[None, st_c_sw, p * 32 + st_r].store(b_st[p])
+                lds_chunk(lds_b, st_c, p * 32 + st_r).store(b_st[p])
             gpu.barrier()
             # 3. LDS -> registers, then MFMA
             for s in range_constexpr(BK // 32):
-                ck = (kg + s * 4) ^ (row % 8)  # row % 8 == (any 16-aligned base + row) % 8
-                a_tile = [lds_a[None, ck, wm * WM + i * 16 + row].load().bitcast(fx.Int16)
+                a_tile = [lds_chunk(lds_a, kg + s * 4, wm * WM + i * 16 + row).load().bitcast(fx.Int16)
                           for i in range_constexpr(NI)]
-                b_tile = [lds_b[None, ck, wn * WN + j * 16 + row].load().bitcast(fx.Int16)
+                b_tile = [lds_chunk(lds_b, kg + s * 4, wn * WN + j * 16 + row).load().bitcast(fx.Int16)
                           for j in range_constexpr(NJ)]
                 for i in range_constexpr(NI):
                     for j in range_constexpr(NJ):
