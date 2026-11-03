@@ -1,0 +1,7 @@
+gemm 8192x9728x8192 bf16 -> fp32
+v0_64x64        8051.1 us   162.2 TFLOPS  correct=True
+v0_128x128      3862.7 us   338.0 TFLOPS  correct=True
+v1              2964.9 us   440.4 TFLOPS  correct=True
+v2_nosched      2259.1 us   578.0 TFLOPS  correct=True
+v2              2013.1 us   648.6 TFLOPS  correct=True
+torch           2061.2 us   633.4 TFLOPS  (hipBLASLt, bf16 out)

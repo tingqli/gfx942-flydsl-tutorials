@@ -1,0 +1,4 @@
+# per dispatch: LDS bank conflict cycles, L2 hit rate, HBM/MALL read GB, MFMA busy (% of CU-cycles)
+v0_128x128 bank_conflict=0 L2_hit=72.0% EA_read=5.59GB MFMA_busy=19.6%
+v1 bank_conflict=0 L2_hit=74.7% EA_read=1.24GB MFMA_busy=20.8%
+v2 bank_conflict=0 L2_hit=72.6% EA_read=1.31GB MFMA_busy=39.5%
