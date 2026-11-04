@@ -1,0 +1,194 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 850" role="img" aria-labelledby="title desc">
+  <title id="title">为什么切成四块：切与不切的寄存器用量</title>
+  <desc id="desc">左右两栏沿用 v2 动画的布局：A 在左下，自左向右经过 GR 暂存、LDS、操作数 VGPR；Bᵀ 在右上，自上而下经过同样三层；C 累加器在右下。左栏不切：DOT(k) 一直读完整的 A(k)、B(k)，为了藏住 LDS 延迟，要把 A(k+1)、B(k+1) 读进第二份操作数寄存器，每 lane 需要 256 + 128 + 128 + 64 = 576 个寄存器，超过 512。右栏切成四块，以 R2 为例：A_top(k)、B_right(k) 正在用，A_bot(k) 等 R3 再用，B_left(k+1) 正在读入；最多存活 4 块共 128 个，总计 448 个，余 64 个给地址和循环变量。</desc>
+  <style>
+    text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #edf2fb; }
+    .bg { fill: #132239; }
+    .title { font-size: 24px; font-weight: 700; }
+    .heading { font-size: 19px; font-weight: 700; }
+    .small { font-size: 14px; }
+    .muted { fill: #aabbcf; }
+    .panel { fill: #182b44; stroke: #3d5675; stroke-width: 1.5; }
+    .slot { fill: #152840; stroke-width: 2.5; }
+    .lds { stroke: #ffce75; }
+    .vgpr { stroke: #6de0d1; }
+    .stage { stroke-dasharray: 6 4; }
+    .c-slot { fill: #312849; stroke: #b48cda; stroke-width: 2; }
+    .c-done { fill: #b380ea; opacity: .3; }
+    .c-now { fill: #b380ea; stroke: #edd4ff; stroke-width: 3; opacity: .7; filter: drop-shadow(0 0 10px #dca5ff); }
+    .tile-a { fill: #355478; stroke: #b6d9ff; stroke-width: 2.2; }
+    .tile-b { fill: #276362; stroke: #a8f4e3; stroke-width: 2.2; }
+    .inuse { stroke: #ffffff; stroke-width: 2.8; filter: drop-shadow(0 0 8px #d6ecff); }
+    .loading { stroke-dasharray: 6 4; }
+    .extra { fill: #5b2d3a; stroke: #ff8a8a; stroke-width: 2.2; stroke-dasharray: 6 4; }
+    .placeholder { fill: none; stroke: #4a6382; stroke-width: 1.5; stroke-dasharray: 4 4; }
+    .name { font-size: 12px; font-weight: 600; text-anchor: middle; }
+    .cname { font-size: 15px; font-weight: 700; text-anchor: middle; }
+    .label { font-size: 12.5px; fill: #aabbcf; }
+    .label-c { font-size: 12.5px; fill: #aabbcf; text-anchor: middle; }
+    .warn { fill: #ff9a9a; }
+    .seg-acc { fill: #6b4f96; stroke: #b48cda; stroke-width: 1.5; }
+    .seg-stage { fill: #1d4a52; stroke: #6de0d1; stroke-width: 1.5; stroke-dasharray: 5 3; }
+    .seg-op { fill: #1f6a66; stroke: #6de0d1; stroke-width: 1.5; }
+    .seg-a { fill: #355478; stroke: #b6d9ff; stroke-width: 1.2; }
+    .seg-b { fill: #276362; stroke: #a8f4e3; stroke-width: 1.2; }
+    .seg-extra { fill: #5b2d3a; stroke: #ff8a8a; stroke-width: 1.5; stroke-dasharray: 5 3; }
+    .seg-free { fill: none; stroke: #6b819c; stroke-width: 1.2; stroke-dasharray: 4 4; }
+    .segtext { font-size: 13px; font-weight: 700; text-anchor: middle; }
+    .limit { stroke: #ffffff; stroke-width: 2; }
+    .eq { font-size: 15px; font-weight: 700; }
+    .eq-ok { fill: #8fe0b0; }
+    .eq-bad { fill: #ff9a9a; }
+    .note { font-size: 13.5px; fill: #c7d5e6; }
+  </style>
+  <defs>
+    <pattern id="hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="#ff8a8a" fill-opacity=".16"/>
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#ff8a8a" stroke-width="3" stroke-opacity=".75"/>
+    </pattern>
+  </defs>
+  <rect class="bg" width="1280" height="850" rx="18"/>
+  <text class="title" x="30" y="40">为什么切成四块：切与不切的寄存器用量（每 lane）</text>
+  <text class="small muted" x="30" y="64">布局同 v2 动画：金框 LDS，青框 VGPR（虚线为 GR 暂存）。C 累加器已占满 256 AGPR，每 lane 寄存器上限 512（256 VGPR + 256 AGPR）。</text>
+  <g transform="translate(30 80)">
+    <rect class="tile-a" x="0" y="0" width="24" height="16" rx="3"/><text class="label" x="32" y="13">A 块</text>
+    <rect class="tile-b" x="96" y="0" width="24" height="16" rx="3"/><text class="label" x="128" y="13">Bᵀ 块</text>
+    <rect class="tile-a inuse" x="200" y="0" width="24" height="16" rx="3"/><text class="label" x="232" y="13">发光：本 region 的 DOT 正在读</text>
+    <rect class="tile-b loading" x="440" y="0" width="24" height="16" rx="3"/><text class="label" x="472" y="13">虚线：正在从 LDS 读入</text>
+    <rect class="extra" x="640" y="0" width="24" height="16" rx="3"/><text class="label" x="672" y="13">红色：第二份操作数</text>
+    <rect class="c-slot" x="830" y="0" width="24" height="16" rx="3"/><text class="label" x="862" y="13">C 累加器（AGPR）</text>
+  </g>
+
+  <!-- Left: whole-tile rotation needs a second operand copy. -->
+  <g transform="translate(30 108)">
+    <rect class="panel" width="600" height="700" rx="14"/>
+    <text class="heading" x="20" y="34">不切：整块轮换</text>
+    <text class="small muted" x="20" y="58">DOT(k) 一直在读 A(k)、B(k)；同时要把 A(k+1)、B(k+1) 读进另一组寄存器</text>
+
+    <text class="heading" x="290" y="111">Bᵀ</text>
+    <rect class="slot vgpr stage" x="320" y="84" width="180" height="40"/>
+    <rect class="slot lds" x="320" y="138" width="180" height="40"/>
+    <rect class="slot vgpr" x="320" y="192" width="180" height="40"/>
+    <rect class="slot vgpr" x="320" y="242" width="180" height="40"/>
+    <rect class="tile-b" x="324" y="88" width="172" height="32" rx="5"/><text class="name" x="410" y="108">B(k+2)</text>
+    <rect class="tile-b" x="324" y="142" width="172" height="32" rx="5"/><text class="name" x="410" y="162">B(k+1)</text>
+    <rect class="extra" x="324" y="196" width="172" height="32" rx="5"/><text class="name" x="410" y="216">B(k+1) · 64 VGPR</text>
+    <rect class="tile-b inuse" x="324" y="246" width="172" height="32" rx="5"/><text class="name" x="410" y="266">B(k) · 64 VGPR</text>
+    <text class="label" x="508" y="108">GR 暂存</text>
+    <text class="label" x="508" y="162">LDS</text>
+    <text class="label warn" x="508" y="216">第二份操作数</text>
+    <text class="label" x="508" y="266">操作数 VGPR</text>
+
+    <text class="heading" x="16" y="374">A</text>
+    <rect class="slot vgpr stage" x="38" y="298" width="60" height="140"/>
+    <rect class="slot lds" x="110" y="298" width="60" height="140"/>
+    <rect class="slot vgpr" x="182" y="298" width="60" height="140"/>
+    <rect class="slot vgpr" x="248" y="298" width="60" height="140"/>
+    <rect class="tile-a" x="42" y="302" width="52" height="132" rx="5"/><text class="name" x="68" y="372">A(k+2)</text>
+    <rect class="tile-a" x="114" y="302" width="52" height="132" rx="5"/><text class="name" x="140" y="372">A(k+1)</text>
+    <rect class="extra" x="186" y="302" width="52" height="132" rx="5"/><text class="name" x="212" y="364">A(k+1)</text><text class="name" x="212" y="382">64</text>
+    <rect class="tile-a inuse" x="252" y="302" width="52" height="132" rx="5"/><text class="name" x="278" y="364">A(k)</text><text class="name" x="278" y="382">64</text>
+    <text class="label-c" x="68" y="458">GR 暂存</text>
+    <text class="label-c" x="140" y="458">LDS</text>
+    <text class="label-c warn" x="212" y="458">第二份</text>
+    <text class="label-c" x="278" y="458">操作数</text>
+
+    <rect class="c-slot" x="320" y="298" width="180" height="140"/>
+    <rect class="c-now" x="320" y="298" width="180" height="140"/>
+    <text class="cname" x="410" y="364">C</text>
+    <text class="name" x="410" y="386">DOT(k)：整块</text>
+    <text class="label-c" x="410" y="458">C 累加器 AGPR</text>
+
+    <!-- Register budget, 0.95 px per register; limit 512 at x = 506.4. -->
+    <text class="label-c" x="141.6" y="492">AGPR 256</text>
+    <text class="label-c" x="384.8" y="492">VGPR 256</text>
+    <rect class="seg-acc" x="20" y="500" width="243.2" height="36"/><text class="segtext" x="141.6" y="523">累加器 256</text>
+    <rect class="seg-op" x="263.2" y="500" width="121.6" height="36"/><text class="segtext" x="324" y="523">操作数 128</text>
+    <rect class="seg-extra" x="384.8" y="500" width="121.6" height="36"/><text class="segtext" x="445.6" y="523">第二份 128</text>
+    <rect class="seg-stage" x="506.4" y="500" width="60.8" height="36"/>
+    <rect x="506.4" y="500" width="60.8" height="36" fill="url(#hatch)"/>
+    <text class="segtext" x="536.8" y="523">暂存 64</text>
+    <line class="limit" x1="506.4" y1="494" x2="506.4" y2="542"/>
+    <text class="label-c" x="506.4" y="558">上限 512</text>
+    <text class="label warn" x="540" y="558">超出 64</text>
+    <text class="eq" x="20" y="584"><tspan class="eq-bad">256 + 128 + 128 + 64 = 576 &gt; 512 ✗</tspan><tspan class="label" dx="8">（地址和循环变量还没算）</tspan></text>
+
+    <text class="note" x="20" y="612">· DOT(k) 要一直读 A(k)、B(k)，直到这一步最后一条 MFMA；</text>
+    <text class="note" x="20" y="636">· 要在这期间藏住 LDS 延迟，A(k+1)、B(k+1) 只能读进另一组寄存器。</text>
+    <text class="note" x="20" y="660">· 若不预读：寄存器够，但每步开头要集中读 32 KiB 操作数，</text>
+    <text class="note" x="32" y="684">仅 LDS 端口就约 1024 cycle（II 的 25%），MFMA 只能等。</text>
+  </g>
+
+  <!-- Right: four halves recycled one by one; snapshot at R2. -->
+  <g transform="translate(650 108)">
+    <rect class="panel" width="600" height="700" rx="14"/>
+    <text class="heading" x="20" y="34">切四块：滚动回收</text>
+    <text class="small muted" x="20" y="58">以 R2 为例：C_tr += A_top(k) × B_right(k)</text>
+
+    <text class="heading" x="290" y="111">Bᵀ</text>
+    <g class="slot vgpr stage"><rect x="320" y="84" width="90" height="40"/><rect x="410" y="84" width="90" height="40"/></g>
+    <g class="slot lds"><rect x="320" y="138" width="90" height="40"/><rect x="410" y="138" width="90" height="40"/></g>
+    <rect class="placeholder" x="320" y="192" width="180" height="40" rx="5"/><text class="label-c" x="410" y="216">不需要第二份</text>
+    <g class="slot vgpr"><rect x="320" y="242" width="90" height="40"/><rect x="410" y="242" width="90" height="40"/></g>
+    <rect class="tile-b" x="324" y="88" width="82" height="32" rx="5"/><text class="name" x="365" y="108">B_left(k+2)</text>
+    <rect class="tile-b" x="414" y="88" width="82" height="32" rx="5"/><text class="name" x="455" y="108">B_right(k+1)</text>
+    <rect class="tile-b" x="324" y="142" width="82" height="32" rx="5"/><text class="name" x="365" y="162">B_left(k+1)</text>
+    <rect class="tile-b" x="414" y="142" width="82" height="32" rx="5"/><text class="name" x="455" y="162">B_right(k)</text>
+    <rect class="tile-b loading" x="324" y="246" width="82" height="32" rx="5"/><text class="name" x="365" y="266">B_left(k+1)</text>
+    <rect class="tile-b inuse" x="414" y="246" width="82" height="32" rx="5"/><text class="name" x="455" y="266">B_right(k)</text>
+    <text class="label" x="508" y="108">GR 暂存</text>
+    <text class="label" x="508" y="162">LDS</text>
+    <text class="label" x="508" y="216">（第二份）</text>
+    <text class="label" x="508" y="263">操作数 VGPR</text>
+    <text class="label" x="508" y="280">每块 32</text>
+
+    <text class="heading" x="16" y="374">A</text>
+    <g class="slot vgpr stage"><rect x="38" y="298" width="60" height="70"/><rect x="38" y="368" width="60" height="70"/></g>
+    <g class="slot lds"><rect x="110" y="298" width="60" height="70"/><rect x="110" y="368" width="60" height="70"/></g>
+    <rect class="placeholder" x="182" y="298" width="60" height="140" rx="5"/><text class="label-c" x="212" y="364">不需要</text><text class="label-c" x="212" y="382">第二份</text>
+    <g class="slot vgpr"><rect x="248" y="298" width="60" height="70"/><rect x="248" y="368" width="60" height="70"/></g>
+    <rect class="tile-a" x="42" y="302" width="52" height="62" rx="5"/><text class="name" x="68" y="329">A_top</text><text class="name" x="68" y="346">(k+2)</text>
+    <rect class="tile-a" x="42" y="372" width="52" height="62" rx="5"/><text class="name" x="68" y="399">A_bot</text><text class="name" x="68" y="416">(k+2)</text>
+    <rect class="tile-a" x="114" y="302" width="52" height="62" rx="5"/><text class="name" x="140" y="329">A_top</text><text class="name" x="140" y="346">(k+1)</text>
+    <rect class="tile-a" x="114" y="372" width="52" height="62" rx="5"/><text class="name" x="140" y="399">A_bot</text><text class="name" x="140" y="416">(k+1)</text>
+    <rect class="tile-a inuse" x="252" y="302" width="52" height="62" rx="5"/><text class="name" x="278" y="329">A_top</text><text class="name" x="278" y="346">(k)</text>
+    <rect class="tile-a" x="252" y="372" width="52" height="62" rx="5"/><text class="name" x="278" y="399">A_bot</text><text class="name" x="278" y="416">(k)</text>
+    <text class="label-c" x="68" y="458">GR 暂存</text>
+    <text class="label-c" x="140" y="458">LDS</text>
+    <text class="label-c" x="212" y="458">（第二份）</text>
+    <text class="label-c" x="278" y="458">操作数</text>
+
+    <g class="c-slot">
+      <rect x="320" y="298" width="90" height="70"/><rect x="410" y="298" width="90" height="70"/>
+      <rect x="320" y="368" width="90" height="70"/><rect x="410" y="368" width="90" height="70"/>
+    </g>
+    <rect class="c-done" x="320" y="298" width="90" height="70"/>
+    <rect class="c-done" x="320" y="368" width="90" height="70"/>
+    <rect class="c-now" x="410" y="298" width="90" height="70"/>
+    <text class="cname" x="365" y="338">C_tl</text><text class="cname" x="455" y="338">C_tr</text>
+    <text class="cname" x="365" y="408">C_bl</text><text class="cname" x="455" y="408">C_br</text>
+    <text class="label-c" x="410" y="458">C 累加器 AGPR</text>
+
+    <!-- Same scale as the left panel. -->
+    <text class="label-c" x="141.6" y="492">AGPR 256</text>
+    <text class="label-c" x="384.8" y="492">VGPR 256</text>
+    <rect class="seg-acc" x="20" y="500" width="243.2" height="36"/><text class="segtext" x="141.6" y="523">累加器 256</text>
+    <rect class="seg-a" x="263.2" y="500" width="30.4" height="36"/>
+    <rect class="seg-a" x="293.6" y="500" width="30.4" height="36"/>
+    <rect class="seg-b" x="324" y="500" width="30.4" height="36"/>
+    <rect class="seg-b" x="354.4" y="500" width="30.4" height="36"/>
+    <text class="segtext" x="324" y="523">操作数 128</text>
+    <rect class="seg-stage" x="384.8" y="500" width="60.8" height="36"/><text class="segtext" x="415.2" y="523">暂存 64</text>
+    <rect class="seg-free" x="445.6" y="500" width="60.8" height="36"/><text class="segtext" x="476" y="523">地址等</text>
+    <line class="limit" x1="506.4" y1="494" x2="506.4" y2="542"/>
+    <text class="label-c" x="506.4" y="558">上限 512</text>
+    <text class="eq" x="20" y="584"><tspan class="eq-ok">256 + 128 + 64 = 448 ≤ 512 ✓</tspan><tspan class="label" dx="8">（余 64 给地址和循环变量）</tspan></text>
+
+    <text class="note" x="20" y="612">· 每块只在 4 个 region 中的 2 个使用；旧值一用完，</text>
+    <text class="note" x="32" y="636">同一组寄存器就读入下一块（图中 B_left 已换成 k+1）。</text>
+    <text class="note" x="20" y="660">· 任何时刻最多存活 4 块 × 32 = 128 VGPR，正好一份操作数。</text>
+    <text class="note" x="20" y="684">· 图中 R2：A_top(k)、B_right(k) 正在用，A_bot(k) 等 R3 再用。</text>
+  </g>
+
+  <text class="label" x="30" y="832">按每 lane 计：操作数 = 每 wave 每个 K 步 A、B 各 128 行 × 64 K × 2 B ÷ (64 lane × 4 B) = 128 个；暂存 = CTA 一个 K 步 64 KiB ÷ (256 lane × 4 B) = 64 个。寄存器条按比例绘制。</text>
+</svg>

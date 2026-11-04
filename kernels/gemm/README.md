@@ -269,8 +269,8 @@ rocprofv3 --pmc TCC_EA0_RDREQ_sum TCC_EA0_RDREQ_32B_sum \
 
 | | TLP（切 wave） | ILP（单 wave 内交错） |
 |---|---|---|
-| 谁来藏延迟 | 硬件调度器：一个 wave 卡住时发另一个 wave 的指令。所有驻留 wave 的寄存器一直在寄存器堆里，“切换”是零开销的逐拍选择，不是上下文切换 | 编译器 / 程序员：在需要等待之前，先发出与它无关的指令 |
-| 代价 | 每个 wave 都要一份寄存器，wave 越多每个 wave 的寄存器越少，tile 只能变小、复用变差 | 要额外寄存器暂存在途的数据；指令顺序要精心安排（软件流水、`rocdl.sched_*`） |
+| 谁来藏延迟 | 硬件调度器：一个 wave 卡住时发另一个 wave 的指令。<br>所有驻留 wave 的寄存器一直在寄存器堆里，<br>“切换”是零开销的逐拍选择，不是上下文切换 | 编译器 / 程序员：在需要等待之前，先发出与它无关的指令 |
+| 代价 | - 每个 wave 都要一份寄存器，wave 越多每个 wave 的寄存器越少，tile 只能变小、复用变差; <br>- wave之间寄存器无法复用，都要从LDS/L2/外存读取，带宽压力增大；<br>- 同行wave寄存器副本增多，浪费寄存器 | - 要额外寄存器暂存在途的数据；<br> -指令顺序要精心安排（软件流水、`rocdl.sched_*`）; |
 | 本例 | 128×128 tile 用满 512 个寄存器，每 SIMD 只能驻留 1 个 wave，**TLP 不可用** | v2 的做法（§3）：提前 2 个 K 步发 load，并把访存与 MFMA 交错 |
 
 一句话：TLP 用“更多 wave”换延迟，ILP 用“更多寄存器 + 更好的指令顺序”换延迟。寄存器既要放大 tile 提高复用，又要支撑多个 wave 或在途数据，三者互相争抢；本教程选择把寄存器优先给大 tile，所以只能走 ILP。
@@ -284,6 +284,12 @@ rocprofv3 --pmc TCC_EA0_RDREQ_sum TCC_EA0_RDREQ_32B_sum \
 - 每个 CU 的 4 个 SIMD 轮流发射，每个 SIMD 每 4 cycle 轮到一次。一次可以从不同 wave 发出最多 5 条不同类型的指令（VALU、SALU、VMEM、LDS、分支等），但**同一个 wave 一次只能发 1 条**。
 - 1 wave/SIMD 时，一个 wave 每 4 cycle 最多发 1 条指令。一条 MFMA 占 16 cycle，所以两条背靠背的 MFMA 之间最多插 3 条别的指令，所有搬运都要挤进这些空隙（§3.7）。
 - MFMA 发出后在矩阵单元里执行，后面不相关的指令可以继续发，依赖由硬件互锁处理。所以“异步”靠的是同一指令流里的交错，而不是专门的异步指令。
+
+下图把这三条画在同一条时间轴上：两条互不依赖的 MFMA 背靠背发出，每条的 16 cycle 里再插 3 条 VALU；随后发出 `buffer_load`，在 `s_waitcnt vmcnt(0)` 之前还能继续发不依赖这次 load 的 VALU，之后整个 wave 停下来等数据。
+
+![1 wave/SIMD 的发射时间轴：两条 MFMA 各夹 3 条 VALU，buffer_load 之后插入 VALU，再用 s_waitcnt 等数据返回](slides/figs/issue_timeline.svg)
+
+[单独查看发射时间轴（SVG）](slides/figs/issue_timeline.svg)
 
 > **NVIDIA 对照**：Hopper 子分区调度器每 cycle 发 1 条，warp 多时靠切换 warp 藏延迟。CDNA3 上本例 1 wave/SIMD 没有其它 wave 可切换，主要靠 ILP 和 `rocdl.sched_*` 辅助编译器安排指令顺序。
 
@@ -422,6 +428,20 @@ __global__ void hopper_ws_tma_gemm(const __grid_constant__ CUtensorMap descA,   
 ### 3.3 半 tile 切分与 4 个 region
 
 A 沿 M 切成 `A_top / A_bot`，B 沿 N 切成 `B_left / B_right`，每个 16 KB，占一个 LDS slot（4 个 slot 正好 64 KB）。`(A 半, B 半)` 组成 C 的一个 128×128 象限；每个 wave 在每个象限各算 64×64。
+
+**为什么切成四块**：LDS、MFMA 操作数寄存器和 GR 暂存都只放得下一个 K 步的一份数据。如果整块轮换，必须等所有 wave 读完当前块才能写下一块；想提前读下一步的操作数，又要第二份操作数寄存器（超出 256 VGPR）。因此要把 tile 切成能各自回收的小块，某块的旧值一用完就立即覆盖。A 切上 / 下、B 切左 / 右是同时满足下列约束的最粗切法：
+
+- global load 仍读满 128 B 整行，`ds_write` 条数不变（沿 K 切做不到）；
+- 每块只在 4 个 region 中的 2 个使用，用完后有时间重读，操作数寄存器峰值正好 128 VGPR（只切 A 时，B 在相邻 region 都要用，需要两份 B 操作数，寄存器超预算）；
+- wave 不按象限分工（否则每个 region 只有一个 wave 在算），而是每个 wave 在每个象限各算 64×64，每个 region 4 个 wave 都有活干。
+
+下图沿用动画的布局，对比同一时刻需要存活的寄存器。左：不切时，DOT(k) 还在读 A(k)、B(k)，下一步的操作数只能读进第二组寄存器，每 lane 共需 576 个，超过 512。右：切成四块后（以 R2 为例），旧块一用完就在原寄存器读入新块，最多存活 4 块，共 448 个。
+
+![左：不切时需要两份操作数寄存器，每 lane 576 个，超过 512；右：切成四块滚动回收，最多 4 块共 128 个，总计 448 个](slides/figs/split_registers.svg)
+
+[单独查看切与不切的寄存器对比（SVG）](slides/figs/split_registers.svg)
+
+完整推导见[附录 C 推导 4](#推导-4切分维度与-wave-划分h3h4h8)；为什么必须切块，见[推导 3](#推导-3缓冲份数h3h4p1p2)。
 
 **先看动画，再对照下面的表和 §3.4–3.5 的代码**：动画只播放稳态循环体（R0 → R1 → barrier X → R2 → R3 → barrier Y），不重复 prologue。每一步的操作同时开始、在 2 秒内完成，随后停顿 3 秒再进入下一步；底部进度条仅在这 2 秒内前进，并显示当前步骤（共 6 步，包含两个 barrier）。这些秒数只是演示节奏，**不是硬件执行延迟**。开头已预备好 A_top/B_left(k) 的 MFMA 操作数、A_bot/B_right(k) 的 LDS 数据以及 k+1 的 GR 暂存；结尾回到相同的存储分布，只把 k 整体推进一步。按典型 GEMM 布局，A 从左下 HBM 向右经 GR 暂存 VGPR、LDS、MFMA 操作数 VGPR；Bᵀ 从右上 HBM 向下经过同样四层。计算 `C_tl += A_top(k) × B_left(k)` 时，**A/B 留在操作数 VGPR 原位**，两条流动箭头表示 MFMA 从中读取；箭头抵达后 `C_tl` 加亮。R1–R3 依次点亮另外三个象限，**亮起后保持至本轮结束，下轮重新全暗**。这只是数据依赖示意，真实 MFMA 不会把操作数搬进 C，而是在 AGPR 中更新累加器。蓝色、金色、青色外框分别代表 HBM、LDS、VGPR（虚线青框是 GR 暂存）；空框表示本次取用，不代表 HBM 数据被删除。同一 region 的访存和 DOT 实际交错发射。
 

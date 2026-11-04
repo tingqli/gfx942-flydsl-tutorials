@@ -1,0 +1,158 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 690" role="img" aria-labelledby="title desc">
+  <title id="title">发射模型：1 wave/SIMD 时的指令时间轴</title>
+  <desc id="desc">横轴为 cycle，每 4 cycle 一次发射机会。一个 wave 先背靠背发出两条互不依赖的 MFMA，每条占矩阵单元 16 cycle，期间各再发 3 条 VALU；随后发出 buffer_load，数据在途时继续发 3 条与它无关的 VALU，再发 s_waitcnt vmcnt(0)，之后停顿到数据返回，才发出使用该数据的指令。停顿期间矩阵单元空闲。断轴处省略了数百到上千 cycle 的访存延迟。</desc>
+  <style>
+    text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #eaf1fa; }
+    .background { fill: #0c1628; }
+    .card { fill: #17283e; stroke: #344a66; stroke-width: 1.5; }
+    .title { font-size: 27px; font-weight: 700; }
+    .heading { font-size: 20px; font-weight: 700; }
+    .body { font-size: 14px; fill: #d3def0; }
+    .small { font-size: 14px; fill: #aabbcf; }
+    .tiny { font-size: 12.5px; fill: #aabbcf; }
+    .row { font-size: 16px; font-weight: 600; fill: #d3def0; }
+    .pill { font-size: 13px; font-weight: 700; text-anchor: middle; }
+    .pillsm { font-size: 11.5px; }
+    .note { font-size: 13.5px; fill: #c7d5e6; text-anchor: middle; }
+    .mono { font-family: Consolas, "Cascadia Mono", "DejaVu Sans Mono", monospace; font-size: 12.5px; fill: #bcd4f2; }
+    .mfma { fill: #7553a7; stroke: #dfb5ff; stroke-width: 1.5; }
+    .valu { fill: #2f7d55; stroke: #8fe0b0; stroke-width: 1.5; }
+    .load { fill: #3272ae; stroke: #8bc7ff; stroke-width: 1.5; }
+    .waitcnt { fill: #8a6a1f; stroke: #f2c46b; stroke-width: 1.5; }
+    .use { fill: #4a5d78; stroke: #b8c8dc; stroke-width: 1.5; }
+    .stall { fill: #62502e; fill-opacity: .56; stroke: #e6bb70; stroke-dasharray: 6 4; }
+    .busy { fill: #61d9c4; }
+    .busytext { font-size: 13px; font-weight: 700; fill: #0c1628; text-anchor: middle; }
+    .idle { fill: none; stroke: #4d6580; stroke-width: 1.2; stroke-dasharray: 5 5; }
+    .inflight { fill: #3272ae; fill-opacity: .28; stroke: #8bc7ff; stroke-width: 1.3; stroke-dasharray: 6 4; }
+    .flighttext { font-size: 13px; fill: #cfe3ff; text-anchor: middle; }
+    .axis { stroke: #69809b; stroke-width: 1.4; marker-end: url(#arrow); }
+    .tick { stroke: #69809b; stroke-width: 1.2; }
+    .ticklabel { font-size: 12.5px; fill: #8fa3bb; text-anchor: middle; }
+    .guide { stroke: #4a6482; stroke-width: 1; stroke-dasharray: 4 5; }
+    .brace { stroke: #9fb3ca; stroke-width: 1.3; fill: none; }
+    .cut { stroke: #9fb3ca; stroke-width: 1.4; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#69809b"/></marker>
+  </defs>
+  <rect class="background" width="1240" height="690" rx="18"/>
+  <text class="title" x="38" y="48">发射模型：1 wave/SIMD 时的指令时间轴</text>
+  <g transform="translate(40 73)">
+    <rect class="mfma" x="0" y="0" width="23" height="17" rx="3"/><text class="small" x="32" y="14">MFMA</text>
+    <rect class="valu" x="160" y="0" width="23" height="17" rx="3"/><text class="small" x="192" y="14">VALU</text>
+    <rect class="load" x="320" y="0" width="23" height="17" rx="3"/><text class="small" x="352" y="14">buffer_load</text>
+    <rect class="waitcnt" x="500" y="0" width="23" height="17" rx="3"/><text class="small" x="532" y="14">s_waitcnt</text>
+    <rect class="stall" x="660" y="0" width="23" height="17" rx="3"/><text class="small" x="692" y="14">停顿（不发射）</text>
+    <rect class="busy" x="850" y="0" width="23" height="17" rx="3"/><text class="small" x="882" y="14">矩阵单元忙碌</text>
+    <rect class="inflight" x="1020" y="0" width="23" height="17" rx="3"/><text class="small" x="1052" y="14">load 在途</text>
+  </g>
+
+  <rect class="card" x="32" y="112" width="1176" height="520" rx="15"/>
+  <text class="heading" x="55" y="148">一个 SIMD 上只有这一个 wave：每 4 cycle 轮到一次，每次最多发它的 1 条指令</text>
+  <text class="small" x="56" y="172">第一行方框是发射时刻，下面三行是各执行单元在忙什么。两条 MFMA 互不依赖；VALU 既不依赖 MFMA 的结果，也不依赖这次 load。</text>
+
+  <!-- Braces above the issue row. -->
+  <path class="brace" d="M203 238 V230 H437 V238"/>
+  <text class="note" x="320" y="222">16 cycle = 4 次发射机会</text>
+  <path class="brace" d="M443 238 V230 H677 V238"/>
+  <text class="note" x="560" y="222">同样再插 3 条 VALU</text>
+  <path class="brace" d="M683 238 V230 H917 V238"/>
+  <text class="note" x="800" y="222">load 在途，继续发无关的 VALU</text>
+  <path class="brace" d="M923 238 V230 H1057 V238"/>
+  <text class="note" x="990" y="222">等 vmcnt 归零前不再发射</text>
+
+  <!-- Row labels. -->
+  <text class="row" x="56" y="271">发射</text>
+  <text class="tiny" x="56" y="289">wave 0</text>
+  <text class="row" x="56" y="341">矩阵单元</text>
+  <text class="row" x="56" y="391">VALU</text>
+  <text class="tiny" x="56" y="409">每条 4 cycle</text>
+  <text class="row" x="56" y="441">VMEM</text>
+
+  <!-- Guides at MFMA boundaries and at the load return. -->
+  <line class="guide" x1="440" y1="244" x2="440" y2="456"/>
+  <line class="guide" x1="680" y1="244" x2="680" y2="456"/>
+  <line class="guide" x1="1060" y1="244" x2="1060" y2="456"/>
+
+  <!-- Issue row: one slot every 4 cycles (60 px). -->
+  <rect class="mfma" x="203" y="252" width="54" height="40" rx="5"/><text class="pill pillsm" x="230" y="276">MFMA 0</text>
+  <rect class="valu" x="263" y="252" width="54" height="40" rx="5"/><text class="pill" x="290" y="277">VALU</text>
+  <rect class="valu" x="323" y="252" width="54" height="40" rx="5"/><text class="pill" x="350" y="277">VALU</text>
+  <rect class="valu" x="383" y="252" width="54" height="40" rx="5"/><text class="pill" x="410" y="277">VALU</text>
+  <rect class="mfma" x="443" y="252" width="54" height="40" rx="5"/><text class="pill pillsm" x="470" y="276">MFMA 1</text>
+  <rect class="valu" x="503" y="252" width="54" height="40" rx="5"/><text class="pill" x="530" y="277">VALU</text>
+  <rect class="valu" x="563" y="252" width="54" height="40" rx="5"/><text class="pill" x="590" y="277">VALU</text>
+  <rect class="valu" x="623" y="252" width="54" height="40" rx="5"/><text class="pill" x="650" y="277">VALU</text>
+  <rect class="load" x="683" y="252" width="54" height="40" rx="5"/><text class="pill" x="710" y="277">LOAD</text>
+  <rect class="valu" x="743" y="252" width="54" height="40" rx="5"/><text class="pill" x="770" y="277">VALU</text>
+  <rect class="valu" x="803" y="252" width="54" height="40" rx="5"/><text class="pill" x="830" y="277">VALU</text>
+  <rect class="valu" x="863" y="252" width="54" height="40" rx="5"/><text class="pill" x="890" y="277">VALU</text>
+  <rect class="waitcnt" x="923" y="252" width="54" height="40" rx="5"/><text class="pill" x="950" y="277">WAIT</text>
+  <rect class="stall" x="983" y="252" width="74" height="40" rx="5"/>
+  <rect class="use" x="1063" y="252" width="54" height="40" rx="5"/><text class="pill" x="1090" y="277">使用</text>
+
+  <!-- Mnemonics under the issue row. -->
+  <text class="mono" x="230" y="309" text-anchor="middle">v_mfma_f32_16x16x16_bf16</text>
+  <text class="mono" x="470" y="309" text-anchor="middle">v_mfma_f32_16x16x16_bf16</text>
+  <text class="mono" x="710" y="309" text-anchor="middle">buffer_load_dwordx4 v[0:3]</text>
+  <text class="mono" x="977" y="309" text-anchor="end">s_waitcnt vmcnt(0)</text>
+  <text class="tiny" x="1100" y="309" text-anchor="middle">用到 v[0:3] 的指令</text>
+
+  <!-- Matrix unit. -->
+  <rect class="busy" x="201" y="322" width="238" height="26" rx="4"/><text class="busytext" x="320" y="340">MFMA 0 执行 16 cycle</text>
+  <rect class="busy" x="441" y="322" width="238" height="26" rx="4"/><text class="busytext" x="560" y="340">MFMA 1 执行 16 cycle</text>
+  <rect class="idle" x="681" y="322" width="438" height="26" rx="4"/><text class="tiny" x="840" y="340" text-anchor="middle">空闲：指令流里没有可发的 MFMA</text>
+
+  <!-- VALU execution: wave64 on SIMD16 takes 4 cycles. -->
+  <rect class="valu" x="262" y="372" width="56" height="26" rx="4"/>
+  <rect class="valu" x="322" y="372" width="56" height="26" rx="4"/>
+  <rect class="valu" x="382" y="372" width="56" height="26" rx="4"/>
+  <rect class="valu" x="502" y="372" width="56" height="26" rx="4"/>
+  <rect class="valu" x="562" y="372" width="56" height="26" rx="4"/>
+  <rect class="valu" x="622" y="372" width="56" height="26" rx="4"/>
+  <rect class="valu" x="742" y="372" width="56" height="26" rx="4"/>
+  <rect class="valu" x="802" y="372" width="56" height="26" rx="4"/>
+  <rect class="valu" x="862" y="372" width="56" height="26" rx="4"/>
+
+  <!-- VMEM: buffer_load in flight until data returns. -->
+  <rect class="inflight" x="681" y="422" width="378" height="26" rx="4"/>
+  <text class="flighttext" x="840" y="440">buffer_load 在途：vmcnt = 1</text>
+  <circle cx="1060" cy="435" r="5" fill="#8bc7ff"/>
+  <text class="tiny" x="1072" y="440">返回，vmcnt = 0</text>
+
+  <!-- Cycle axis. -->
+  <line class="axis" x1="200" y1="482" x2="1150" y2="482"/>
+  <g>
+    <line class="tick" x1="200" y1="477" x2="200" y2="487"/><text class="ticklabel" x="200" y="503">0</text>
+    <line class="tick" x1="260" y1="477" x2="260" y2="487"/><text class="ticklabel" x="260" y="503">4</text>
+    <line class="tick" x1="320" y1="477" x2="320" y2="487"/><text class="ticklabel" x="320" y="503">8</text>
+    <line class="tick" x1="380" y1="477" x2="380" y2="487"/><text class="ticklabel" x="380" y="503">12</text>
+    <line class="tick" x1="440" y1="477" x2="440" y2="487"/><text class="ticklabel" x="440" y="503">16</text>
+    <line class="tick" x1="500" y1="477" x2="500" y2="487"/><text class="ticklabel" x="500" y="503">20</text>
+    <line class="tick" x1="560" y1="477" x2="560" y2="487"/><text class="ticklabel" x="560" y="503">24</text>
+    <line class="tick" x1="620" y1="477" x2="620" y2="487"/><text class="ticklabel" x="620" y="503">28</text>
+    <line class="tick" x1="680" y1="477" x2="680" y2="487"/><text class="ticklabel" x="680" y="503">32</text>
+    <line class="tick" x1="740" y1="477" x2="740" y2="487"/><text class="ticklabel" x="740" y="503">36</text>
+    <line class="tick" x1="800" y1="477" x2="800" y2="487"/><text class="ticklabel" x="800" y="503">40</text>
+    <line class="tick" x1="860" y1="477" x2="860" y2="487"/><text class="ticklabel" x="860" y="503">44</text>
+    <line class="tick" x1="920" y1="477" x2="920" y2="487"/><text class="ticklabel" x="920" y="503">48</text>
+    <line class="tick" x1="980" y1="477" x2="980" y2="487"/><text class="ticklabel" x="980" y="503">52</text>
+    <line class="tick" x1="1060" y1="477" x2="1060" y2="487"/><text class="ticklabel" x="1060" y="503">32 + L</text>
+  </g>
+  <text class="tiny" x="1158" y="487">cycle</text>
+
+  <!-- Axis break: hundreds to 1000+ cycles omitted. -->
+  <polygon points="993,242 1005,242 1013,492 1001,492" fill="#17283e"/>
+  <line class="cut" x1="993" y1="242" x2="1001" y2="492"/>
+  <line class="cut" x1="1005" y1="242" x2="1013" y2="492"/>
+  <text class="pill" x="1035" y="277">停顿</text>
+
+  <text class="tiny" x="200" y="528">每格 4 cycle = 一次发射机会；L 为 buffer_load 的延迟，数百～上千 cycle，断轴处省略</text>
+
+  <text class="body" x="56" y="566">① 一条 MFMA 只占 1 次发射机会，却让矩阵单元忙 16 cycle；其余 3 次发射机会可以发与它无关的指令（VALU、ds、buffer_load 等）。</text>
+  <text class="body" x="56" y="592">② buffer_load 发出后不阻塞，直到 s_waitcnt 才停下。1 wave/SIMD 时，停顿期间没有别的 wave 可发，矩阵单元也空着：</text>
+  <text class="body" x="76" y="616">要么在 s_waitcnt 之前排进足够多与这次 load 无关的 MFMA（ILP，v2 的做法），要么让别的 wave 来填（TLP）。</text>
+
+  <text class="small" x="38" y="664">示意图：假设 1 wave/SIMD、指令之间没有依赖停顿，未画真实流水级；VALU 按 wave64 在 SIMD16 上执行 4 cycle 计。</text>
+</svg>
