@@ -1,0 +1,207 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 860" role="img" aria-labelledby="title desc">
+  <title id="title">v2 GEMM：A 与 B 的数据块从 HBM 流向 C</title>
+  <desc id="desc">循环演示六步稳态 kstep：R0、R1、barrier X、R2、R3、barrier Y。每步操作用两秒同步完成，步间停顿三秒。A/B 半 tile 沿 HBM、GR 暂存、LDS 和操作数 VGPR 运动；DOT 用从操作数 VGPR 指向 C 的流动箭头示意 MFMA 读取。四个 C 象限本轮依次亮起并保持至轮末，下一轮重新从全暗开始。底部进度条只在每步操作期间前进，显示当前步数/总步数。</desc>
+  <style>
+    text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #edf2fb; }
+    .bg { fill: #132239; }
+    .title { font-size: 24px; font-weight: 700; }
+    .heading { font-size: 18px; font-weight: 700; }
+    .small { font-size: 14px; }
+    .muted { fill: #aabbcf; }
+    .slot { fill: #152840; stroke-width: 2.5; }
+    .hbm { stroke: #87bbff; }
+    .lds { stroke: #ffce75; }
+    .vgpr { stroke: #6de0d1; }
+    .stage { stroke-dasharray: 6 4; }
+    .c-slot { fill: #312849; stroke: #b48cda; stroke-width: 2; }
+    .tile-a { fill: #355478; stroke: #b6d9ff; stroke-width: 2.5; }
+    .tile-b { fill: #276362; stroke: #a8f4e3; stroke-width: 2.5; }
+    .payload { filter: drop-shadow(0 0 7px #c5dcf3); }
+    .tile-name { font-size: 13px; font-weight: 600; }
+    .status { fill: #283a54; stroke: #4a6382; stroke-width: 1.5; }
+    .acc-focus { fill: #b380ea; stroke: #edd4ff; stroke-width: 3; filter: drop-shadow(0 0 11px #dca5ff); }
+    .dot-arrow { fill: none; stroke: #d7acff; stroke-width: 2.5; stroke-linecap: round; opacity: .8; marker-end: url(#dot-tip); }
+    .dot-pulse { fill: #f1d4ff; filter: drop-shadow(0 0 6px #dca5ff); }
+    .progress-track { fill: #14243a; stroke: #54708e; stroke-width: 1.5; }
+    .progress-fill { fill: #86c7ff; filter: drop-shadow(0 0 5px #7bbdff); }
+    .progress-tick { stroke: #8299b2; stroke-width: 1; opacity: .8; }
+    .step-count { font-size: 19px; font-weight: 700; fill: #a9deff; }
+    .frame { opacity: 0; }
+  </style>
+  <rect class="bg" width="1280" height="860" rx="18"/>
+  <text class="title" x="30" y="42">v2 · GEMM 单 wave 软件流水</text>
+  <text class="small muted" x="30" y="69">稳态 loop body：每步同步运动 2 秒，随后停顿 3 秒；C 四象限本轮依次加亮，下轮全暗重播。</text>
+  <rect class="status" x="30" y="110" width="748" height="231" rx="13"/>
+  <text class="heading" x="51" y="144">稳态 K 步 k · 入口与出口相差一个 K 步</text>
+  <text class="small muted" x="51" y="292">蓝框 HBM · 金框 LDS · 青框 VGPR（虚线：GR 暂存）· 紫框 C 累加器</text>
+  <text class="small muted" x="51" y="317">入口 / 出口分布相同：VGPR 预读 + LDS 旧值 + GR 暂存 + HBM 下一步。</text>
+
+  <!-- Fixed empty slots: they never carry data or labels until a payload reaches them. -->
+  <text class="heading" x="840" y="39">Bᵀ [K,N]（示意；显存 B 为 [N,K]）</text>
+  <text class="small muted" x="767" y="103">下一块</text><text class="small muted" x="767" y="160">k+1</text><text class="small muted" x="785" y="217">k</text>
+  <g class="slot hbm">
+    <rect x="880" y="74" width="104" height="52"/><rect x="984" y="74" width="104" height="52"/>
+    <rect x="880" y="131" width="104" height="52"/><rect x="984" y="131" width="104" height="52"/>
+    <rect x="880" y="188" width="104" height="52"/><rect x="984" y="188" width="104" height="52"/>
+  </g>
+  <g class="slot vgpr stage"><rect x="880" y="291" width="104" height="52"/><rect x="984" y="291" width="104" height="52"/></g>
+  <g class="slot lds"><rect x="880" y="392" width="104" height="52"/><rect x="984" y="392" width="104" height="52"/></g>
+  <g class="slot vgpr"><rect x="880" y="489" width="104" height="52"/><rect x="984" y="489" width="104" height="52"/></g>
+  <text class="small muted" x="1115" y="157">HBM</text>
+  <text class="small muted" x="1115" y="323">GR 暂存 VGPR</text>
+  <text class="small muted" x="1115" y="423">LDS</text>
+  <text class="small muted" x="1115" y="520">MFMA 操作数 VGPR</text>
+
+  <text class="heading" x="30" y="499">A [M,K]</text>
+  <text class="small muted" x="48" y="568">下一块</text><text class="small muted" x="148" y="568">k+1</text><text class="small muted" x="258" y="568">k</text>
+  <g class="slot hbm">
+    <rect x="30" y="574" width="96" height="76"/><rect x="30" y="650" width="96" height="76"/>
+    <rect x="130" y="574" width="96" height="76"/><rect x="130" y="650" width="96" height="76"/>
+    <rect x="230" y="574" width="96" height="76"/><rect x="230" y="650" width="96" height="76"/>
+  </g>
+  <g class="slot vgpr stage"><rect x="376" y="574" width="96" height="76"/><rect x="376" y="650" width="96" height="76"/></g>
+  <g class="slot lds"><rect x="508" y="574" width="96" height="76"/><rect x="508" y="650" width="96" height="76"/></g>
+  <g class="slot vgpr"><rect x="640" y="574" width="96" height="76"/><rect x="640" y="650" width="96" height="76"/></g>
+  <text class="small muted" x="54" y="758">HBM</text><text class="small muted" x="366" y="758">GR 暂存 VGPR</text>
+  <text class="small muted" x="540" y="758">LDS</text><text class="small muted" x="630" y="758">MFMA 操作数 VGPR</text>
+  <g class="c-slot">
+    <rect x="880" y="574" width="104" height="76"/><rect x="984" y="574" width="104" height="76"/>
+    <rect x="880" y="650" width="104" height="76"/><rect x="984" y="650" width="104" height="76"/>
+  </g>
+  <!-- Each accumulator lights when the matching 2s DOT completes; the 30s loop resets all four. -->
+  <g>
+    <rect class="acc-focus" x="880" y="574" width="104" height="76" opacity="0">
+      <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.066667;1" values="0;.65;.65"/>
+    </rect>
+    <rect class="acc-focus" x="880" y="650" width="104" height="76" opacity="0">
+      <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.233333;1" values="0;.65;.65"/>
+    </rect>
+    <rect class="acc-focus" x="984" y="574" width="104" height="76" opacity="0">
+      <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.566667;1" values="0;.65;.65"/>
+    </rect>
+    <rect class="acc-focus" x="984" y="650" width="104" height="76" opacity="0">
+      <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.733333;1" values="0;.65;.65"/>
+    </rect>
+  </g>
+  <text class="heading" x="903" y="618">C_tl</text><text class="heading" x="1004" y="618">C_tr</text>
+  <text class="heading" x="901" y="695">C_bl</text><text class="heading" x="1004" y="695">C_br</text>
+  <text class="small muted" x="920" y="758">C 累加器 AGPR</text>
+
+  <!-- Six frames model only the loop body: R0, R1, X, R2, R3, Y. -->
+  <g class="frame f0"><text class="heading" x="51" y="193">R0 · C_tl += A_top(k) × B_left(k)</text><text class="heading" x="51" y="230">LR A_bot(k) · LW B_left(k+1) · GR B_left(k+2)</text>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.166667;1" values="1;0;0"/></g>
+  <g class="frame f1"><text class="heading" x="51" y="193">R1 · C_bl += A_bot(k) × B_left(k)</text><text class="heading" x="51" y="230">LR B_right(k) · LW A_top(k+1) · GR A_top(k+2)</text>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.166667;.333333;1" values="0;1;0;0"/></g>
+  <g class="frame f2"><text class="heading" x="51" y="193">barrier X · 四个 wave 会合</text><text class="heading" x="51" y="230">旧 A_bot / B_right 已读完，新 B_left / A_top 已写入 LDS。</text>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.333333;.5;1" values="0;1;0;0"/></g>
+  <g class="frame f3"><text class="heading" x="51" y="193">R2 · C_tr += A_top(k) × B_right(k)</text><text class="heading" x="51" y="230">LR B_left(k+1) · LW A_bot(k+1) · GR A_bot(k+2)</text>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.5;.666667;1" values="0;1;0;0"/></g>
+  <g class="frame f4"><text class="heading" x="51" y="193">R3 · C_br += A_bot(k) × B_right(k)</text><text class="heading" x="51" y="230">LR A_top(k+1) · LW B_right(k+1) · GR B_right(k+2)</text>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.666667;.833333;1" values="0;1;0;0"/></g>
+  <g class="frame f5"><text class="heading" x="51" y="193">barrier Y · k 步结束</text><text class="heading" x="51" y="230">操作数 A_top/B_left(k+1)；LDS A_bot/B_right(k+1)；GR k+2。</text><text class="small muted" x="51" y="262">下一轮直接 R0(k+1)；重播时 k 表示新的当前步。</text>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.833333;1" values="0;1;0"/></g>
+
+  <!-- Loop entry is the prepared state left by the preceding iteration's Y. -->
+  <g class="payload">
+    <rect class="tile-a" x="-47" y="-21" width="94" height="42" rx="6"/><text class="tile-name" text-anchor="middle" y="5">A_top(k)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;1" values="688 612;688 612"/>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.566667;1" values="1;0;0"/>
+  </g>
+  <g class="payload">
+    <rect class="tile-a" x="-47" y="-21" width="94" height="42" rx="6"/><text class="tile-name" text-anchor="middle" y="5">A_bot(k)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;.066667;1" values="556 688;688 688;688 688"/>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.733333;1" values="1;0;0"/>
+  </g>
+  <g class="payload">
+    <rect class="tile-b" x="-48" y="-20" width="96" height="40" rx="6"/><text class="tile-name" text-anchor="middle" y="5">B_left(k)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;1" values="932 515;932 515"/>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.233333;1" values="1;0;0"/>
+  </g>
+  <g class="payload">
+    <rect class="tile-b" x="-48" y="-20" width="96" height="40" rx="6"/><text class="tile-name" text-anchor="middle" y="5">B_right(k)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;.166667;.233333;1" values="1036 418;1036 418;1036 515;1036 515"/>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.733333;1" values="1;0;0"/>
+  </g>
+
+  <!-- k+1 begins in the four GR staging registers, not in HBM. -->
+  <g class="payload"><rect class="tile-a" x="-47" y="-21" width="94" height="42" rx="6"/><text class="tile-name" text-anchor="middle" y="5">A_top(k+1)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;.166667;.233333;.666667;.733333;1" values="424 612;424 612;556 612;556 612;688 612;688 612"/></g>
+  <g class="payload"><rect class="tile-a" x="-47" y="-21" width="94" height="42" rx="6"/><text class="tile-name" text-anchor="middle" y="5">A_bot(k+1)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;.5;.566667;1" values="424 688;424 688;556 688;556 688"/></g>
+  <g class="payload"><rect class="tile-b" x="-48" y="-20" width="96" height="40" rx="6"/><text class="tile-name" text-anchor="middle" y="5">B_left(k+1)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;.066667;.5;.566667;1" values="932 317;932 418;932 418;932 515;932 515"/></g>
+  <g class="payload"><rect class="tile-b" x="-48" y="-20" width="96" height="40" rx="6"/><text class="tile-name" text-anchor="middle" y="5">B_right(k+1)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;.666667;.733333;1" values="1036 317;1036 317;1036 418;1036 418"/></g>
+
+  <!-- Each region fetches its own k+2 half after releasing the k+1 staging slot. -->
+  <g class="payload"><rect class="tile-b" x="-48" y="-20" width="96" height="40" rx="6"/><text class="tile-name" text-anchor="middle" y="5">B_left(k+2)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;.066667;1" values="932 100;932 317;932 317"/></g>
+  <g class="payload"><rect class="tile-a" x="-47" y="-21" width="94" height="42" rx="6"/><text class="tile-name" text-anchor="middle" y="5">A_top(k+2)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;.166667;.233333;1" values="78 612;78 612;424 612;424 612"/></g>
+  <g class="payload"><rect class="tile-a" x="-47" y="-21" width="94" height="42" rx="6"/><text class="tile-name" text-anchor="middle" y="5">A_bot(k+2)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;.5;.566667;1" values="78 688;78 688;424 688;424 688"/></g>
+  <g class="payload"><rect class="tile-b" x="-48" y="-20" width="96" height="40" rx="6"/><text class="tile-name" text-anchor="middle" y="5">B_right(k+2)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;.666667;.733333;1" values="1036 100;1036 100;1036 317;1036 317"/></g>
+
+  <!-- The visible HBM window advances to k+3 once its k+2 tile is fetched.
+       k+3 is pre-existing HBM data, not produced by the computation. -->
+  <g class="payload" opacity="0"><rect class="tile-a" x="-47" y="-21" width="94" height="42" rx="6"/><text class="tile-name" text-anchor="middle" y="5">A_top(k+3)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;1" values="78 612;78 612"/>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.233333;1" values="0;1;1"/></g>
+  <g class="payload" opacity="0"><rect class="tile-a" x="-47" y="-21" width="94" height="42" rx="6"/><text class="tile-name" text-anchor="middle" y="5">A_bot(k+3)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;1" values="78 688;78 688"/>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.566667;1" values="0;1;1"/></g>
+  <g class="payload" opacity="0"><rect class="tile-b" x="-48" y="-20" width="96" height="40" rx="6"/><text class="tile-name" text-anchor="middle" y="5">B_left(k+3)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;1" values="932 100;932 100"/>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.066667;1" values="0;1;1"/></g>
+  <g class="payload" opacity="0"><rect class="tile-b" x="-48" y="-20" width="96" height="40" rx="6"/><text class="tile-name" text-anchor="middle" y="5">B_right(k+3)</text>
+    <animateTransform attributeName="transform" type="translate" dur="30s" repeatCount="indefinite" keyTimes="0;1" values="1036 100;1036 100"/>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.733333;1" values="0;1;1"/></g>
+
+  <!-- DOT reads but does not transfer operand VGPRs. The two luminous pulses
+       trace A and B into each accumulator; storage blocks stay put for reuse. -->
+  <defs>
+    <marker id="dot-tip" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#d7acff"/></marker>
+  </defs>
+  <g opacity="0">
+    <path class="dot-arrow" d="M736 612 H921"/><path class="dot-arrow" d="M932 541 V601"/>
+    <circle class="dot-pulse" r="6"><animateMotion path="M736 612 H921" dur="30s" repeatCount="indefinite" calcMode="linear" keyTimes="0;.066667;1" keyPoints="0;1;1"/></circle>
+    <circle class="dot-pulse" r="6"><animateMotion path="M932 541 V601" dur="30s" repeatCount="indefinite" calcMode="linear" keyTimes="0;.066667;1" keyPoints="0;1;1"/></circle>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.066667;1" values="1;0;0"/>
+  </g>
+  <g opacity="0">
+    <path class="dot-arrow" d="M736 688 H921"/><path class="dot-arrow" d="M932 541 V677"/>
+    <circle class="dot-pulse" r="6"><animateMotion path="M736 688 H921" dur="30s" repeatCount="indefinite" calcMode="linear" keyTimes="0;.166667;.233333;1" keyPoints="0;0;1;1"/></circle>
+    <circle class="dot-pulse" r="6"><animateMotion path="M932 541 V677" dur="30s" repeatCount="indefinite" calcMode="linear" keyTimes="0;.166667;.233333;1" keyPoints="0;0;1;1"/></circle>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.166667;.233333;1" values="0;1;0;0"/>
+  </g>
+  <g opacity="0">
+    <path class="dot-arrow" d="M736 612 H1025"/><path class="dot-arrow" d="M1036 541 V601"/>
+    <circle class="dot-pulse" r="6"><animateMotion path="M736 612 H1025" dur="30s" repeatCount="indefinite" calcMode="linear" keyTimes="0;.5;.566667;1" keyPoints="0;0;1;1"/></circle>
+    <circle class="dot-pulse" r="6"><animateMotion path="M1036 541 V601" dur="30s" repeatCount="indefinite" calcMode="linear" keyTimes="0;.5;.566667;1" keyPoints="0;0;1;1"/></circle>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.5;.566667;1" values="0;1;0;0"/>
+  </g>
+  <g opacity="0">
+    <path class="dot-arrow" d="M736 688 H1025"/><path class="dot-arrow" d="M1036 541 V677"/>
+    <circle class="dot-pulse" r="6"><animateMotion path="M736 688 H1025" dur="30s" repeatCount="indefinite" calcMode="linear" keyTimes="0;.666667;.733333;1" keyPoints="0;0;1;1"/></circle>
+    <circle class="dot-pulse" r="6"><animateMotion path="M1036 541 V677" dur="30s" repeatCount="indefinite" calcMode="linear" keyTimes="0;.666667;.733333;1" keyPoints="0;0;1;1"/></circle>
+    <animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.666667;.733333;1" values="0;1;0;0"/>
+  </g>
+
+  <!-- One iteration = four regions plus two CTA barriers; fill resets with the data flow. -->
+  <rect class="status" x="30" y="780" width="1220" height="62" rx="13"/>
+  <text class="heading" x="50" y="817">当前进度</text>
+  <rect class="progress-track" x="154" y="798" width="934" height="20" rx="7"/>
+  <rect class="progress-fill" x="154" y="798" width="0" height="20" rx="7">
+    <animate attributeName="width" dur="30s" repeatCount="indefinite" calcMode="linear"
+      keyTimes="0;.066667;.166667;.233333;.333333;.4;.5;.566667;.666667;.733333;.833333;.9;1"
+      values="0;155.667;155.667;311.333;311.333;467;467;622.667;622.667;778.333;778.333;934;934"/>
+  </rect>
+  <path class="progress-tick" d="M310 798 V818 M465 798 V818 M621 798 V818 M777 798 V818 M932 798 V818"/>
+  <text class="step-count frame f0" x="1110" y="817">1 / 6<animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.166667;1" values="1;0;0"/></text>
+  <text class="step-count frame f1" x="1110" y="817">2 / 6<animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.166667;.333333;1" values="0;1;0;0"/></text>
+  <text class="step-count frame f2" x="1110" y="817">3 / 6<animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.333333;.5;1" values="0;1;0;0"/></text>
+  <text class="step-count frame f3" x="1110" y="817">4 / 6<animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.5;.666667;1" values="0;1;0;0"/></text>
+  <text class="step-count frame f4" x="1110" y="817">5 / 6<animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.666667;.833333;1" values="0;1;0;0"/></text>
+  <text class="step-count frame f5" x="1110" y="817">6 / 6<animate attributeName="opacity" calcMode="discrete" dur="30s" repeatCount="indefinite" keyTimes="0;.833333;1" values="0;1;0"/></text>
+</svg>
