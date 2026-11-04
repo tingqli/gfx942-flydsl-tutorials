@@ -23,12 +23,118 @@ python3 bench.py v1 v2              # 指定版本
 
 ---
 
+## 对比 Hopper GEMM 优化方法
+
+下面是 Hopper（sm90a）上 warp specialization + TMA + WGMMA 的典型写法，结构对应 CUTLASS 3.x 的 `KernelTmaWarpSpecializedCooperative`（单 CTA，不含 cluster / multicast）。
+
+```c++
+// ============================================================
+// Hopper Warp-Specialized TMA GEMM 伪代码
+// A[M,K] * B[K,N] -> D[M,N]，BF16 输入，FP32 累加
+// CTA = 3 个 warpgroup（384 线程）：WG0 = producer，WG1/WG2 = consumer
+// CTA tile 256x128：两个 consumer WG 沿 M 各算 128x128（cooperative）
+// smem：N_STAGES 级 A/B 环形缓冲（H100 每 SM 228 KB，常见 4~7 级）
+// ============================================================
+
+__global__ void hopper_ws_tma_gemm(const __grid_constant__ CUtensorMap descA,   // TMA 描述符由 host 创建，
+                                   const __grid_constant__ CUtensorMap descB,   // 必须以 __grid_constant__ 传入
+                                   ...) {
+    // ---------- 关键点 1：线程角色划分 ----------
+    int  wg_id       = threadIdx.x / 128;          // 0 = producer, 1..2 = consumer
+    int  warp_in_wg  = (threadIdx.x / 32) % 4;
+    bool is_producer = (wg_id == 0);
+
+    // ---------- 关键点 2：smem 环形缓冲 + mbarrier ----------
+    extern __shared__ char smem[];
+    Tile* sA[N_STAGES], *sB[N_STAGES];             // 指向 smem 内的各级 buffer
+    __shared__ uint64_t full_barrier[N_STAGES];    // mbarrier 必须放在 smem
+    __shared__ uint64_t empty_barrier[N_STAGES];   // full：数据已到；empty：可被覆盖
+
+    if (threadIdx.x == 0) {
+        for (int i = 0; i < N_STAGES; i++) {
+            mbarrier_init(full_barrier[i], 1);               // 1 次 arrive（producer）+ tx 字节计数
+            mbarrier_init(empty_barrier[i], NUM_CONSUMER_WG); // 每个 consumer WG 1 次 arrive
+        }
+        fence_barrier_init();                       // 让 async proxy（TMA 单元）看到初始化结果
+    }
+    __syncthreads();
+
+    // ---------- 关键点 3：寄存器重新分配（setmaxnreg） ----------
+    // 以每线程 168 个寄存器启动（384 × 168 = 64512），再按角色重新分配：
+    // 128 × 24 + 256 × 240 = 64512 ≤ 65536（每 SM 64K 个 32 位寄存器）
+    if (is_producer) warpgroup_reg_dealloc<24>();
+    else             warpgroup_reg_alloc<240>();
+
+    // ============================================================
+    // producer：整个 WG 只有 1 个线程发 TMA
+    // ============================================================
+    if (is_producer) {
+        // elect_one_sync() 是“每个 warp 选 1 个线程”，所以还要限定 warp 0，
+        // 否则 4 个 warp 各发一次 TMA、各 arrive 一次，full_barrier 计数就错了
+        if (warp_in_wg == 0 && elect_one_sync()) {
+            int stage = 0, phase = 1;               // producer 从 phase=1 开始：首轮 wait 直接通过（buffer 初始为空）
+            for (int k_tile = 0; k_tile < num_k_tiles; k_tile++) {
+                mbarrier_wait(empty_barrier[stage], phase);                       // 等 consumer 释放该级
+                mbarrier_arrive_expect_tx(full_barrier[stage], BYTES_A + BYTES_B); // 声明将到达的字节数
+                tma_load_2d(descA, sA[stage], {k_tile * BK, m0}, full_barrier[stage]); // 异步；数据写入 smem 后
+                tma_load_2d(descB, sB[stage], {k_tile * BK, n0}, full_barrier[stage]); // 硬件按字节数递减 tx
+                if (++stage == N_STAGES) { stage = 0; phase ^= 1; }
+            }
+        }
+    }
+    // ============================================================
+    // consumer：2 个 WG，各自用 WGMMA 算 128x128
+    // ============================================================
+    else {
+        float acc[128] = {0};                      // 累加器在寄存器：128x128 fp32 / 128 线程
+        int m_off = (wg_id - 1) * 128;             // cooperative：沿 M 切半（ping-pong 则两个 WG 各算不同 tile）
+        int stage = 0, phase = 0, prev = -1;
+        for (int k_tile = 0; k_tile < num_k_tiles; k_tile++) {
+            mbarrier_wait(full_barrier[stage], phase);   // producer 已 arrive 且 tx 归零 = TMA 数据已写入 smem
+
+            // ---------- 关键点 4：WGMMA（异步，4 个 warp 共同发射） ----------
+            warpgroup_arrive();                           // wgmma.fence：保证此前对累加器寄存器的读写有序
+            wgmma_async(acc, sA[stage] + m_off, sB[stage]); // B 必须来自 smem；A 可来自 smem 或寄存器
+            wgmma_commit_group();
+            wgmma_wait<1>();                              // 只留本次在飞，上一级的 wgmma 已读完 smem
+            if (prev >= 0 && threadIdx.x % 128 == 0)
+                mbarrier_arrive(empty_barrier[prev]);     // 释放上一级给 producer
+            prev = stage;
+            if (++stage == N_STAGES) { stage = 0; phase ^= 1; }
+        }
+        wgmma_wait<0>();
+        if (threadIdx.x % 128 == 0) mbarrier_arrive(empty_barrier[prev]);
+
+        // ---------- 关键点 5：epilogue ----------
+        store_accumulator(acc);   // 寄存器 -> smem -> TMA store，或直接 st.global
+    }
+}
+```
+
+### 这些关键技术在 CDNA3 / CDNA4 上的情况
+
+| Hopper 技术 | 作用 | CDNA3（gfx942，MI300X/MI325X） | CDNA4（gfx950，MI350X/MI355X） | 本教程的替代做法 |
+|---|---|---|---|---|
+| **TMA**（张量描述符，单线程发起，硬件生成地址、越界填充、smem swizzle） | 搬运不占寄存器，几乎不占发射槽 | **无**。每个 lane 自己算地址；global→LDS 直通只有 4 B/lane（`buffer_load_dword ... lds`） | **无 TMA**。新增 16 B/lane 的 `global/buffer_load_lds_dwordx4`，数据不经 VGPR，但仍是每 lane 一条地址、用 `vmcnt` 计数；LDS 目标地址由 `M0` + lane 线性决定，swizzle 只能在 global 地址一侧做 | global → VGPR → `ds_write`（v1/v2）；buffer resource 的 `num_records` 越界读返回 0，部分代替 TMA 的边界处理；XOR swizzle 手算 |
+| **mbarrier + 事务计数**（arrive / wait 分离、phase 翻转、TMA 完成自动递减） | 生产者与消费者按 stage 精确握手，不需要全 CTA 同步 | **无**。只有 `s_barrier`（CTA 内**所有** wave 一起）和每个 wave 自己的 `s_waitcnt vmcnt/lgkmcnt` | 同 CDNA3 | 用全 CTA `s_barrier` + 编译器插入的 `s_waitcnt`；自己用 LDS 标志位 + 轮询（`s_sleep`）可以模拟，但开销大 |
+| **Warp specialization**（producer / consumer WG） | 搬运和计算由不同 warp 负责，靠 warp 调度器重叠 | 可以写，但**不划算**：没有部分 barrier；producer wave 要和某个 consumer 共用一个 SIMD 的发射槽和寄存器 | 同 CDNA3 | 单 wave 软件流水（v2，ILP）；或每 SIMD 2 个 wave 用 `s_barrier` + `s_setprio` 乒乓（§5 inter_wave） |
+| **setmaxnreg**（运行时按 WG 调整寄存器数） | producer 让出寄存器给 consumer 放大累加器 | **无**。同一 kernel 所有 wave 的 VGPR/AGPR 数在编译期固定 | 同 CDNA3 | 1 wave/SIMD 下每 wave 512 个（256 VGPR + 256 AGPR）都给计算；如果再加一个 producer wave，每 wave 最多只剩一半，累加器 tile 就得减半 |
+| **WGMMA**（异步、操作数直接读 smem、`commit/wait_group`） | 不用先把 A/B 搬进寄存器；MMA 在后台跑 | **无**。MFMA 操作数只能来自 VGPR/AGPR，每个 K 步都要先 `ds_read`；MFMA 是流水发射的，后面不相关的指令可以继续发，靠硬件互锁处理依赖，没有 `wait_group` | 同 CDNA3；MFMA 吞吐翻倍（`v_mfma_f32_16x16x32_bf16`），新增 `ds_read_b64_tr_b16`（读 LDS 时转置） | `ds_read` 与 MFMA 在同一指令流里穿插（`sched_group_barrier`，§3.7） |
+| **大 smem 多级流水** | 3~7 级环形缓冲藏住 HBM 延迟 | LDS 64 KB/CU，256×256×64 只能放 1 级 | LDS 160 KB/CU，可以 2 级 | 用寄存器当第二级 buffer（§3.2、§3.6） |
+| **Thread Block Cluster / DSMEM / TMA multicast** | 相邻 CTA 共享一次 global 读 | **无** | **无** | 依赖 L2 / MALL 复用；XCD 感知的 CTA 重映射（§5） |
+| **TMA store**（epilogue） | 寄存器 → smem → 一条指令批量写回 | **无** | **无** | 每个 lane 自己 `global_store` / `buffer_store` |
+
+总结：
+
+- **CDNA3** 上，搬运必须经过 VGPR，同步只有全 CTA `s_barrier` 和每 wave 的计数器，矩阵指令只能读寄存器。Hopper 那一套“TMA + mbarrier + WGMMA + setmaxnreg”撑起来的 warp specialization 一样都没有，所以本教程走单 wave 软件流水，把搬运、`ds_read`、`ds_write` 都排进同一个指令流里和 MFMA 穿插。
+- **CDNA4** 补上了 16 B 的 global→LDS 直通和 160 KB LDS，能力上接近 Ampere 的 `cp.async` + 多级 smem 流水（不占 VGPR、可以双缓冲），但仍没有 TMA、mbarrier、WGMMA、setmaxnreg、cluster，同步模型和 CDNA3 一样。
+
 ## 0. 先记住的硬件事实（CDNA3 / MI300X、MI325X）
 
 | 项目 | 数值 | 对 kernel 的含义 |
 |---|---|---|
 | CU | 8 XCD × 38 = 304，每 CU 4 个 SIMD，wave64 | 一个 CTA 最多用满 1 个 CU；4 wave/CTA = 每 SIMD 1 个 wave |
-| 寄存器 | 每 SIMD 512 KB；1 wave/SIMD 时每 lane 256 VGPR + 256 AGPR | 累加器可放 AGPR，不挤占 VGPR；occupancy 越高每 wave 寄存器越少 |
+| 寄存器 | VGPR+AGPR 每 SIMD 128 KB（每 CU 512 KB）；1 wave/SIMD 时每 lane 256 VGPR + 256 AGPR | 累加器可放 AGPR，不挤占 VGPR；occupancy 越高每 wave 寄存器越少 |
 | MFMA | `v_mfma_f32_16x16x16_bf16`：8192 FLOP，每 SIMD 16 cycle | 峰值 304 × 4 × 512 FLOP/clk × 2.1 GHz = **1307 TFLOPS** |
 | LDS | 64 KB/CU，32 bank × 4 B，128 B/clk，4 个 SIMD 共享 | 256×256×64 的 A+B 正好一级，**无法双缓冲** |
 | L1 | 32 KB/CU | |
@@ -40,16 +146,46 @@ python3 bench.py v1 v2              # 指定版本
 
 ### 与 NVIDIA 的对照（只说与本例相关的）
 
-| | CDNA3 | NVIDIA Ampere / Hopper | 本例中的体现 |
+MI300X（CDNA3，2023）同代的对手是 Hopper（H100 2022 / H200 2024）。这里只保留“本例中最相关”的两条线：CDNA3 与 Hopper。
+
+**算力密度**
+
+| | MI300X（CDNA3） | H100 / H200 SXM（Hopper） |
+|---|---|---|
+| 计算单元 × 频率 | 304 CU × 2.1 GHz | 132 SM × ~1.83 GHz |
+| 每单元矩阵核 | 4 个 Matrix Core（每 SIMD 1 个） | 4 个 Tensor Core（每子分区 1 个） |
+| FP16/BF16 dense，FLOP / 单元 / cycle | **2048** | **4096** |
+| FP8 dense，FLOP / 单元 / cycle | 4096 | 8192 |
+| 整卡 BF16 dense | 1307 TFLOPS | 989 TFLOPS |
+| FP32 vector（VALU / CUDA core），FLOP / 单元 / cycle | 128（`v_pk_fma_f32` 打包时 256） | 256（128 个 FP32 core） |
+| FP64 vector，FLOP / 单元 / cycle | 128 | 128 |
+| 整卡 FP32 vector | 81.7 TFLOPS（打包 163.4） | ~67 TFLOPS |
+| 整卡 FP64 vector | 81.7 TFLOPS | ~34 TFLOPS |
+| 矩阵 / vector 算力比（BF16 矩阵 ÷ FP32 vector） | 16×（打包 8×） | 16× |
+| HBM | 5.3 TB/s（MI325X ~6 TB/s） | 3.35 TB/s（H100）/ 4.8 TB/s（H200） |
+
+- 单个 CU 和 Hopper 的单个 SM 算力是相同的，都是一个 SM 的一半；MI300X 整卡更高，是因为它有 304 个 CU，单元数是 H100 的 2.3 倍。
+- vector 算力同理：未打包时 MI300X 与 Hopper 的每个“单元”都相同，都是 Hopper 的一半；两者矩阵 / vector 仍然约为 16×。CDNA3 的 FP64 vector 是全速（与 FP32 未打包相同），整卡 FP64 远高于 NVIDIA。
+- 对 GEMM 来说 VALU 只用于地址计算和 epilogue，不是瓶颈；但 attention 的 softmax、量化 GEMM 的反量化这类在寄存器里做逐元素运算的 kernel，VALU 做 1 FLOP 的时间矩阵单元能做 16 FLOP，VALU 很容易反过来卡住 MFMA。
+- 换算到本例：每个 SIMD 512 FLOP/cycle，`v_mfma_f32_16x16x16_bf16`（8192 FLOP）占 16 cycle，§3.7 的发射配比就是按这个数算的。
+
+**执行模型与存储层次**
+
+| | CDNA3 | Hopper（H100/H200） | 本例中的体现 |
 |---|---|---|---|
-| 执行粒度 | wave64，SIMD | warp32，SM 子分区 | MFMA 操作数排布以 64 lane 为单位（§1.2） |
-| 矩阵指令 | MFMA，操作数在 VGPR/AGPR，同步发射 | Ampere `mma.sync` 同样在寄存器；Hopper `wgmma` 可直接读 smem、异步 | CDNA3 每个 K 步都要先 `ds_read` 到寄存器 |
-| 片上共享存储 | LDS 64 KB | A100 164 KB、H100 228 KB | NVIDIA 常见 3~5 级流水；CDNA3 只能 1 级（§3） |
-| 异步拷贝 | 无宽的 global→LDS 异步拷贝 | `cp.async`（Ampere）、TMA（Hopper），不占寄存器 | v2 用 64 个 VGPR 暂存下一块，并在指令流里发 `ds_write`（§3.6） |
-| 累加器 | 独立的 AGPR 文件 | 统一寄存器堆，每线程 ≤ 255 | 128×128/wave 的 fp32 累加器正好占满 256 AGPR |
-| 等待机制 | `s_waitcnt` 计数器，编译器显式插入 | 寄存器记分板（硬件自动）+ `cp.async.wait_group` / mbarrier | 读 ISA 时看 `vmcnt(N)` 判断流水深度 |
-| bank conflict | 32 bank × 4 B | 32 bank × 4 B | XOR swizzle 原理相同（CUTLASS `Swizzle<3,4,3>`） |
-| L2 | 每 XCD 独立 | 全芯片统一 | CTA → XCD 映射会影响 L2 命中（下一步优化） |
+| 调度单位 | wave64 | warp32；`wgmma` 以 warpgroup（4 warp = 128 线程）为单位 | MFMA 操作数排布以 64 lane 为单位（§1.2） |
+| 执行宽度（FP32 VALU） | 每 CU 4 × SIMD16，wave64 一条指令占 4 cycle | 4 个子分区 × 32 FP32 lane，1 cycle | |
+| 指令发射 | 4 个 SIMD 轮流，每个 SIMD 每 4 cycle 轮到一次；一次最多发 5 条不同类型（VALU / SALU / VMEM / LDS / 分支）、分别来自不同 wave，同一 wave 一次只发 1 条 | 每个子分区调度器每 cycle 从就绪 warp 中选 1 个发 1 条 | 1 wave/SIMD 时，每 4 cycle 最多发 1 条指令；两条背靠背的 16 cycle MFMA 之间最多插 3 条别的指令（§3.7、§3.8） |
+| 标量路径 | 独立 SALU + SGPR（每 wave ≤ 102 个），由编译器显式使用 | Uniform Datapath + 63 个 uniform 寄存器（Turing 起），编译器自动把 warp 内一致的值放进去 | 循环变量、基址、buffer 描述符在 SGPR |
+| 寄存器 | SGPR / VGPR / AGPR 分离；VGPR+AGPR 每 CU 512 KB，每 wave 每 lane ≤ 512（256 V + 256 A），编译期固定 | 同 Ampere；`setmaxnreg` 可在运行时按 warpgroup 调整（24~256） | 128×128/wave 的 fp32 累加器正好占满 256 AGPR |
+| 矩阵指令 | MFMA，wave 级，操作数在 VGPR/AGPR | `wgmma.mma_async`，warpgroup 级，异步；B 直接读 smem，A 读 smem 或寄存器 | CDNA3 每个 K 步都要先 `ds_read` 到寄存器 |
+| 片上共享存储 | LDS 64 KB/CU | smem ≤ 228 KB/SM（与 L1 共 256 KB） | NVIDIA 常见 3~7 级流水；CDNA3 只能 1 级（§3） |
+| 异步拷贝 | 无宽的 global→LDS 拷贝（只有 4 B/lane） | TMA（`cp.async.bulk.tensor`）：单线程发起整块，硬件生成地址 | v2 用 64 个 VGPR 暂存下一块，并在指令流里发 `ds_write`（§3.6） |
+| 等待机制 | `s_waitcnt vmcnt/lgkmcnt`：按发射顺序计数，编译器插入 | `wgmma.wait_group` + mbarrier 事务计数；`cp.async.wait_group` | 读 ISA 时看 `vmcnt(N)` 判断流水深度 |
+| CTA 内同步 | 只有 `s_barrier`（全 CTA 所有 wave） | mbarrier（smem 中，arrive/wait 分离） + `bar.sync` | v2 每个 K 步 2 个全 CTA barrier（§3.4） |
+| bank conflict | 32 bank × 4 B | 32 bank × 4 B；TMA 写 smem 时可由硬件做 32/64/128 B swizzle | XOR swizzle 原理相同（CUTLASS `Swizzle<3,4,3>`），CDNA3 要手算 |
+| L2 | 4 MB/XCD × 8，XCD 之间不共享；另有 256 MB MALL | 50 MB，两个分区，全芯片一致 | CTA → XCD 映射会影响 L2 命中（§5） |
+| CTA 间协作 | 无 | Thread Block Cluster：DSMEM、TMA multicast | |
 
 ---
 
