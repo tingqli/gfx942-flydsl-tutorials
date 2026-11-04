@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1110" role="img" aria-labelledby="title desc">
+  <title id="title">Hopper 单 CTA warp-specialized TMA GEMM：角色分工与 producer-consumer 交互时序</title>
+  <desc id="desc">上半部是一个 producer warpgroup、两个 consumer warpgroup 和多级 smem 环的资源分工。下半部是时间向右的 WG0、TMA/smem、WG1、WG2 四条泳道：producer 等 empty[s] 后 expect_tx 并发 TMA 填 stage s；传输结束令 full[s] 可通过，两组 consumer 各自读同一 stage 的 A/B 并异步 WGMMA。与此同时 producer 可以填下一级 s+1；consumers 在发 s+1 的 WGMMA 并 wait 小于等于一组在飞后，各对上一级 empty[s] arrive 一次。两次 arrive 都到齐后 producer 下次轮转到 s 时才可覆写；此图仅表示依赖，不按周期绘制。</desc>
+  <style>
+    text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #eaf1fa; }
+    .bg { fill: #0c1628; }
+    .panel { fill: #17283e; stroke: #344a66; stroke-width: 1.5; }
+    .input { fill: #1c344f; stroke: #83b9ff; stroke-width: 2; }
+    .producer { fill: #1d3d51; stroke: #6de0d1; stroke-width: 2; }
+    .stage { fill: #28334f; stroke: #b69be9; stroke-width: 1.6; }
+    .barrier { fill: #493927; stroke: #eec275; stroke-width: 1.5; }
+    .consumer { fill: #30304f; stroke: #bc9aee; stroke-width: 2; }
+    .register { fill: #304158; stroke: #a7cff7; stroke-width: 1.4; }
+    .event { fill: #20344c; stroke: #58718f; stroke-width: 1.4; }
+    .event-producer { fill: #1d3d51; stroke: #6de0d1; stroke-width: 1.4; }
+    .event-tma { fill: #213c58; stroke: #81c9fa; stroke-width: 1.4; }
+    .event-compute { fill: #30304f; stroke: #bc9aee; stroke-width: 1.4; }
+    .event-sync { fill: #493927; stroke: #eec275; stroke-width: 1.4; }
+    .lane { stroke: #5c728c; stroke-width: 1.2; stroke-dasharray: 4 5; }
+    .event-label { font-size: 13px; font-weight: 600; }
+    .title { font-size: 27px; font-weight: 700; }
+    .heading { font-size: 20px; font-weight: 700; }
+    .label { font-size: 16px; font-weight: 600; }
+    .small { font-size: 14px; fill: #b5c5d8; }
+    .num { font-size: 18px; font-weight: 700; fill: #9cdeef; }
+    .data-arrow { fill: none; stroke: #81c9fa; stroke-width: 3; marker-end: url(#data-tip); }
+    .compute-arrow { fill: none; stroke: #caadf5; stroke-width: 3; marker-end: url(#compute-tip); }
+    .handshake { fill: none; stroke: #f0c177; stroke-width: 2.5; stroke-dasharray: 8 5; marker-end: url(#handshake-tip); }
+  </style>
+  <defs>
+    <marker id="data-tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#81c9fa"/></marker>
+    <marker id="compute-tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#caadf5"/></marker>
+    <marker id="handshake-tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#f0c177"/></marker>
+  </defs>
+  <rect class="bg" width="1280" height="1110" rx="18"/>
+  <text class="title" x="38" y="50">Hopper warp-specialized TMA GEMM：谁搬、谁算、何时复用 smem？</text>
+  <text class="small" x="39" y="78">单 CTA · 3 个 warpgroup × 128 线程 · C tile 256×128 · A/B 多级 smem 环形缓冲（示意，不按实际 cycle 绘制）</text>
+
+  <!-- Data and work roles. Draw links behind the boxes. -->
+  <rect class="panel" x="30" y="103" width="1220" height="453" rx="15"/>
+  <path class="data-arrow" d="M227 309 H263"/>
+  <path class="data-arrow" d="M514 309 H540"/>
+  <path class="compute-arrow" d="M869 261 H894"/>
+  <path class="compute-arrow" d="M869 397 H894"/>
+
+  <text class="heading" x="52" y="142">全局显存</text>
+  <rect class="input" x="50" y="190" width="177" height="261" rx="12"/>
+  <text class="label" x="65" y="229">A [M,K]</text>
+  <text class="small" x="65" y="253">本 CTA 读 256×BK</text>
+  <text class="label" x="65" y="309">B [K,N]</text>
+  <text class="small" x="65" y="333">本 CTA 读 BK×128</text>
+  <text class="small" x="65" y="397">host 生成 TMA</text>
+  <text class="small" x="65" y="420">张量描述符</text>
+
+  <text class="heading" x="272" y="142">WG0 · producer</text>
+  <rect class="producer" x="263" y="190" width="251" height="261" rx="12"/>
+  <text class="label" x="280" y="226">128 线程 / 4 warp</text>
+  <text class="small" x="280" y="253">setmaxnreg：让出寄存器</text>
+  <text class="small" x="280" y="283">仅选出 1 个线程发 TMA：</text>
+  <text class="label" x="280" y="315">wait(empty[s])</text>
+  <text class="label" x="280" y="344">expect_tx(A+B)</text>
+  <text class="label" x="280" y="373">TMA → sA[s]、sB[s]</text>
+  <text class="small" x="280" y="416">发出加载后可去准备下一 stage</text>
+
+  <text class="heading" x="552" y="142">SM 共享内存 · N_STAGES 级环</text>
+  <rect class="panel" x="540" y="190" width="329" height="261" rx="12"/>
+  <rect class="stage" x="558" y="216" width="294" height="45" rx="7"/>
+  <text class="label" x="573" y="244">stage 0 · sA[0] + sB[0]</text>
+  <rect class="stage" x="558" y="267" width="294" height="45" rx="7"/>
+  <text class="label" x="573" y="295">stage 1 · sA[1] + sB[1]</text>
+  <text class="stage" x="558" y="320" width="294" height="45" rx="7"/>
+  <text class="label" x="573" y="348">… stage s（s = k % N_STAGES）</text>
+  <rect class="barrier" x="558" y="381" width="138" height="48" rx="7"/>
+  <rect class="barrier" x="706" y="381" width="146" height="48" rx="7"/>
+  <text class="label" x="571" y="408">full[s]</text>
+  <text class="label" x="719" y="408">empty[s]</text>
+  <text class="small" x="561" y="446">每一级各有一对 mbarrier</text>
+
+  <text class="heading" x="903" y="142">WG1、WG2 · consumers</text>
+  <rect class="consumer" x="894" y="190" width="336" height="122" rx="12"/>
+  <text class="label" x="910" y="219">WG1 · C[0:128, :]（上半）</text>
+  <text class="small" x="910" y="244">wait(full[s]) → sA 上半 + sB</text>
+  <text class="label" x="910" y="270">WGMMA → acc₀（寄存器）</text>
+  <text class="small" x="910" y="295">setmaxnreg：更多寄存器存累加器</text>
+  <rect class="consumer" x="894" y="326" width="336" height="122" rx="12"/>
+  <text class="label" x="910" y="355">WG2 · C[128:256, :]（下半）</text>
+  <text class="small" x="910" y="380">wait(full[s]) → sA 下半 + 同一 sB</text>
+  <text class="label" x="910" y="406">WGMMA → acc₁（寄存器）</text>
+  <text class="small" x="910" y="431">两个 WG 并行计算不同的 C 子块</text>
+  <text class="small" x="55" y="533">蓝色箭头：TMA 将 A/B 搬入 smem · 紫色箭头：两个 consumer 从同一 stage 读 A/B、分别更新各自的 C 累加器</text>
+
+  <!-- Horizontal event sequence for two adjacent K-tiles; x is logical time, not cycles. -->
+  <rect class="panel" x="30" y="571" width="1220" height="483" rx="15"/>
+  <text class="heading" x="51" y="608">WG0 / TMA / WG1 / WG2：相邻两个 stage 的交互时序</text>
+  <text class="small" x="52" y="636">时间向右 →；同一纵列不代表严格同时。蓝：TMA 数据就绪，紫：WGMMA 读取，黄虚线：mbarrier 信号与释放。</text>
+  <text class="small" x="237" y="663">装填 stage s（当前 K tile）</text>
+  <text class="small" x="672" y="663">装填 s+1 / 同时计算 s</text>
+  <text class="small" x="1045" y="663">计算 s+1 / 释放 s</text>
+
+  <text class="label" x="52" y="711">WG0 producer</text>
+  <text class="label" x="52" y="789">TMA / smem</text>
+  <text class="label" x="52" y="867">WG1 consumer</text>
+  <text class="label" x="52" y="945">WG2 consumer</text>
+  <line class="lane" x1="220" y1="705" x2="1224" y2="705"/>
+  <line class="lane" x1="220" y1="783" x2="1224" y2="783"/>
+  <line class="lane" x1="220" y1="861" x2="1224" y2="861"/>
+  <line class="lane" x1="220" y1="939" x2="1224" y2="939"/>
+
+  <!-- Producer can move on while TMA executes. The final wait is at a later ring wrap. -->
+  <rect class="event-sync" x="228" y="681" width="129" height="48" rx="7"/>
+  <text class="event-label" x="236" y="701">wait empty[s]</text><text class="small" x="236" y="720">槽可覆写</text>
+  <rect class="event-producer" x="363" y="681" width="157" height="48" rx="7"/>
+  <text class="event-label" x="371" y="701">expect_tx + TMA</text><text class="small" x="371" y="720">发 A/B → s</text>
+  <rect class="event-sync" x="595" y="681" width="136" height="48" rx="7"/>
+  <text class="event-label" x="603" y="701">wait empty[s+1]</text><text class="small" x="603" y="720">槽可覆写</text>
+  <rect class="event-producer" x="737" y="681" width="148" height="48" rx="7"/>
+  <text class="event-label" x="745" y="701">expect_tx + TMA</text><text class="small" x="745" y="720">发 A/B → s+1</text>
+  <rect class="event-sync" x="1100" y="681" width="123" height="48" rx="7"/>
+  <text class="event-label" x="1107" y="701">下次 wait</text><text class="small" x="1107" y="720">empty[s]</text>
+
+  <!-- Hardware signals full only after both A and B have reached smem. -->
+  <rect class="event-tma" x="363" y="759" width="163" height="48" rx="7"/>
+  <text class="event-label" x="371" y="779">TMA 写 sA / sB</text><text class="small" x="371" y="798">异步，tx 字节递减</text>
+  <rect class="event-sync" x="530" y="759" width="103" height="48" rx="7"/>
+  <text class="event-label" x="538" y="780">full[s]</text><text class="small" x="538" y="798">tx = 0</text>
+  <rect class="event-tma" x="737" y="759" width="149" height="48" rx="7"/>
+  <text class="event-label" x="745" y="779">TMA 写 s+1</text><text class="small" x="745" y="798">与 WGMMA(s) 重叠</text>
+  <rect class="event-sync" x="890" y="759" width="104" height="48" rx="7"/>
+  <text class="event-label" x="898" y="780">full[s+1]</text><text class="small" x="898" y="798">tx = 0</text>
+  <path class="data-arrow" d="M486 731 V754"/>
+  <path class="data-arrow" d="M840 731 V754"/>
+  <path class="handshake" d="M580 808 V835 H636"/>
+  <path class="handshake" d="M586 808 V913 H636"/>
+  <path class="handshake" d="M942 808 V835 H952"/>
+  <path class="handshake" d="M948 808 V913 H952"/>
+
+  <!-- Both consumer WGs wait for the same full, read disjoint A halves and shared B. -->
+  <rect class="event-sync" x="636" y="837" width="113" height="48" rx="7"/>
+  <text class="event-label" x="644" y="857">wait full[s]</text><text class="small" x="644" y="875">A 上半 + B</text>
+  <rect class="event-compute" x="755" y="837" width="126" height="48" rx="7"/>
+  <text class="event-label" x="763" y="857">WGMMA(s)</text><text class="small" x="763" y="875">→ acc₀</text>
+  <rect class="event-sync" x="952" y="837" width="113" height="48" rx="7"/>
+  <text class="event-label" x="960" y="857">wait full[s+1]</text><text class="small" x="960" y="875">下一块数据</text>
+  <rect class="event-compute" x="1070" y="837" width="111" height="48" rx="7"/>
+  <text class="event-label" x="1077" y="857">WGMMA(s+1)</text><text class="small" x="1077" y="875">→ acc₀</text>
+
+  <rect class="event-sync" x="636" y="915" width="113" height="48" rx="7"/>
+  <text class="event-label" x="644" y="935">wait full[s]</text><text class="small" x="644" y="953">A 下半 + B</text>
+  <rect class="event-compute" x="755" y="915" width="126" height="48" rx="7"/>
+  <text class="event-label" x="763" y="935">WGMMA(s)</text><text class="small" x="763" y="953">→ acc₁</text>
+  <rect class="event-sync" x="952" y="915" width="113" height="48" rx="7"/>
+  <text class="event-label" x="960" y="935">wait full[s+1]</text><text class="small" x="960" y="953">下一块数据</text>
+  <rect class="event-compute" x="1070" y="915" width="111" height="48" rx="7"/>
+  <text class="event-label" x="1077" y="935">WGMMA(s+1)</text><text class="small" x="1077" y="953">→ acc₁</text>
+
+  <rect class="event-sync" x="1024" y="980" width="207" height="44" rx="7"/>
+  <text class="event-label" x="1032" y="998">wait&lt;1&gt; → empty[s]</text>
+  <text class="small" x="1032" y="1016">WG1、WG2 各 arrive 一次</text>
+  <path class="handshake" d="M1121 889 V975"/>
+  <path class="handshake" d="M1144 964 V975"/>
+  <path class="handshake" d="M1219 980 V733"/>
+  <text class="small" x="50" y="1039">上一级 prev = s：发 s+1 的 WGMMA 并 wait&lt;1&gt; 后，旧 WGMMA(s) 不再读 smem[s]；两次 arrive 才允许下一次覆写 s。</text>
+  <text class="small" x="38" y="1083">示意：多级环、阶段交叠；首轮 wait(empty) 可直接通过。轮转回 s 时 phase 翻转；横向位置非实际周期或等长延迟。</text>
+</svg>

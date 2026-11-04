@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 900" role="img" aria-labelledby="title desc">
+  <title id="title">三种延迟隐藏方式：串行等待、TLP 切 wave、ILP 单 wave 软件流水</title>
+  <desc id="desc">横轴为示意时间。第一段一条 wave 加载后等待数据，矩阵单元只短暂忙碌。第二段多条 wave 依次发起加载，某条等待时调度器发另一条 wave，三个矩阵计算接续。第三段一条 wave 在计算当前 tile 时提前发起下一个 tile 的加载，利用指令级并行重叠加载与矩阵计算。本图不按硬件周期比例绘制。</desc>
+  <style>
+    text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #eaf1fa; }
+    .background { fill: #0c1628; }
+    .card { fill: #17283e; stroke: #344a66; stroke-width: 1.5; }
+    .title { font-size: 27px; font-weight: 700; }
+    .heading { font-size: 21px; font-weight: 700; }
+    .body { font-size: 16px; }
+    .small { font-size: 14px; fill: #aabbcf; }
+    .row { font-size: 16px; font-weight: 600; fill: #d3def0; }
+    .load { fill: #3272ae; stroke: #8bc7ff; stroke-width: 1.5; }
+    .wait { fill: #62502e; fill-opacity: .56; stroke: #e6bb70; stroke-dasharray: 6 4; }
+    .mfma { fill: #7553a7; stroke: #dfb5ff; stroke-width: 1.5; }
+    .busy { fill: #61d9c4; }
+    .axis { stroke: #69809b; stroke-width: 1.4; marker-end: url(#arrow); }
+    .guide { stroke: #39516b; stroke-width: 1; stroke-dasharray: 4 5; }
+    .flight { stroke: #88c8ff; stroke-width: 2; fill: none; marker-end: url(#flight-arrow); }
+    .pill { font-size: 14px; font-weight: 700; text-anchor: middle; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#69809b"/></marker>
+    <marker id="flight-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#88c8ff"/></marker>
+  </defs>
+  <rect class="background" width="1240" height="900" rx="18"/>
+  <text class="title" x="38" y="48">延迟怎么藏：TLP（切 wave）与 ILP（单 wave 交错）</text>
+  <g transform="translate(40 73)">
+    <rect class="load" x="0" y="0" width="23" height="17" rx="3"/><text class="small" x="32" y="14">发起 global load</text>
+    <rect class="wait" x="200" y="0" width="23" height="17" rx="3"/><text class="small" x="232" y="14">该 wave 等待数据</text>
+    <rect class="mfma" x="414" y="0" width="23" height="17" rx="3"/><text class="small" x="446" y="14">MFMA 计算</text>
+    <rect class="busy" x="630" y="0" width="23" height="17" rx="3"/><text class="small" x="662" y="14">矩阵单元忙碌</text>
+  </g>
+
+  <!-- 1. Serial load/wait/compute. -->
+  <rect class="card" x="32" y="115" width="1176" height="204" rx="15"/>
+  <text class="heading" x="55" y="151">① 不隐藏：load → 等 → 算</text>
+  <text class="small" x="56" y="174">v0 近似模式：load 后立即等 vmcnt(0)，拿到数据才算</text>
+  <text class="row" x="57" y="214">wave A</text>
+  <rect class="load" x="214" y="190" width="64" height="35" rx="5"/>
+  <text class="pill" x="246" y="214">LD 0</text>
+  <rect class="wait" x="283" y="190" width="229" height="35" rx="5"/>
+  <text class="pill" x="397" y="214">等数据 0</text>
+  <rect class="mfma" x="516" y="190" width="93" height="35" rx="5"/>
+  <text class="pill" x="562" y="214">MFMA 0</text>
+  <rect class="load" x="614" y="190" width="64" height="35" rx="5"/>
+  <text class="pill" x="646" y="214">LD 1</text>
+  <rect class="wait" x="683" y="190" width="229" height="35" rx="5"/>
+  <text class="pill" x="797" y="214">等数据 1</text>
+  <rect class="mfma" x="916" y="190" width="93" height="35" rx="5"/>
+  <text class="pill" x="962" y="214">MFMA 1</text>
+  <text class="row" x="57" y="270">MFMA 单元</text>
+  <line class="guide" x1="214" y1="250" x2="1065" y2="250"/>
+  <rect class="busy" x="516" y="252" width="93" height="20" rx="4"/>
+  <rect class="busy" x="916" y="252" width="93" height="20" rx="4"/>
+  <text class="small" x="1024" y="269">大量空闲</text>
+  <line class="axis" x1="214" y1="297" x2="1115" y2="297"/>
+  <text class="small" x="1120" y="302">时间</text>
+
+  <!-- 2. TLP: different resident waves take turns; each still has its own wait. -->
+  <rect class="card" x="32" y="333" width="1176" height="267" rx="15"/>
+  <text class="heading" x="55" y="369">② TLP：多条 wave 交替发射</text>
+  <text class="small" x="56" y="391">同一 SIMD 上有多个驻留 wave；A 等待时，调度器可发 B、C（示意，不是本例 occupancy=1 的配置）</text>
+  <text class="row" x="57" y="432">wave A</text>
+  <text class="row" x="57" y="474">wave B</text>
+  <text class="row" x="57" y="516">wave C</text>
+  <rect class="load" x="214" y="408" width="64" height="32" rx="5"/><text class="pill" x="246" y="430">LD A</text>
+  <rect class="wait" x="282" y="408" width="292" height="32" rx="5"/><text class="pill" x="428" y="430">A 等待</text>
+  <rect class="mfma" x="578" y="408" width="89" height="32" rx="5"/><text class="pill" x="622" y="430">MFMA A</text>
+  <rect class="load" x="285" y="450" width="64" height="32" rx="5"/><text class="pill" x="317" y="472">LD B</text>
+  <rect class="wait" x="353" y="450" width="310" height="32" rx="5"/><text class="pill" x="508" y="472">B 等待</text>
+  <rect class="mfma" x="667" y="450" width="89" height="32" rx="5"/><text class="pill" x="711" y="472">MFMA B</text>
+  <rect class="load" x="356" y="492" width="64" height="32" rx="5"/><text class="pill" x="388" y="514">LD C</text>
+  <rect class="wait" x="424" y="492" width="328" height="32" rx="5"/><text class="pill" x="588" y="514">C 等待</text>
+  <rect class="mfma" x="756" y="492" width="89" height="32" rx="5"/><text class="pill" x="800" y="514">MFMA C</text>
+  <text class="row" x="57" y="556">MFMA 单元</text>
+  <rect class="busy" x="578" y="538" width="267" height="20" rx="4"/>
+  <text class="small" x="859" y="554">不同 wave 接续填空</text>
+  <line class="axis" x1="214" y1="578" x2="1115" y2="578"/>
+  <text class="small" x="1120" y="583">时间</text>
+
+  <!-- 3. ILP: prefetch future data before computing a ready tile in the same wave. -->
+  <rect class="card" x="32" y="614" width="1176" height="240" rx="15"/>
+  <text class="heading" x="55" y="651">③ ILP：一条 wave 内交错 load 与 MFMA</text>
+  <text class="small" x="56" y="673">tile 0 已就绪；LD 1 在算 tile 0 时在途，LD 2 在算 tile 1 时在途；消费下一块前才等待它</text>
+  <text class="row" x="57" y="720">wave A</text>
+  <rect class="load" x="214" y="697" width="78" height="35" rx="5"/><text class="pill" x="253" y="721">LD 1</text>
+  <rect class="mfma" x="297" y="697" width="146" height="35" rx="5"/><text class="pill" x="370" y="721">MFMA 0</text>
+  <rect class="load" x="448" y="697" width="78" height="35" rx="5"/><text class="pill" x="487" y="721">LD 2</text>
+  <rect class="mfma" x="531" y="697" width="146" height="35" rx="5"/><text class="pill" x="604" y="721">MFMA 1</text>
+  <rect class="load" x="682" y="697" width="78" height="35" rx="5"/><text class="pill" x="721" y="721">LD 3</text>
+  <rect class="mfma" x="765" y="697" width="146" height="35" rx="5"/><text class="pill" x="838" y="721">MFMA 2</text>
+  <path class="flight" d="M253 739 V763 H604 V735"/>
+  <path class="flight" d="M487 739 V781 H838 V735"/>
+  <text class="small" x="328" y="759">LD 1 在途 → MFMA 1</text>
+  <text class="small" x="563" y="796">LD 2 在途 → MFMA 2</text>
+  <text class="row" x="57" y="828">MFMA 单元</text>
+  <rect class="busy" x="297" y="810" width="146" height="20" rx="4"/>
+  <rect class="busy" x="531" y="810" width="146" height="20" rx="4"/>
+  <rect class="busy" x="765" y="810" width="146" height="20" rx="4"/>
+  <text class="small" x="929" y="826">靠同一 wave 的独立指令填空</text>
+
+  <text class="small" x="38" y="884">示意图：横向距离不代表精确周期或吞吐；实际是否重叠由寄存器依赖、waitcnt、占用率及指令调度决定。</text>
+</svg>

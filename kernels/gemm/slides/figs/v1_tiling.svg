@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 790" role="img" aria-labelledby="title desc">
+  <title id="title">v1 GEMM CTA tile：A、B 在 LDS 共享，C 按 2×2 wave 切分</title>
+  <desc id="desc">单个 CTA 的 C 为 256×256，由四个 wave 切成两行两列，每个 wave 计算 128×128 并在 AGPR 中累加。当前 K 步 BK 为 64，A 为 256×64 BF16、B 转置视图为 64×256 BF16，分别占 32 KiB LDS，总计 64 KiB。A 上下半部分分别供 wave 0、2 与 wave 1、3 复用；B 左右半部分分别供 wave 0、1 与 wave 2、3 复用。每个 K 步算 8388608 FLOP，逻辑 A/B 读取 64 KiB，理想强度为 128 flop/B。按 2048 FLOP 每 CU 周期推算 4096 周期，LDS 128 KiB 读加 64 KiB 写对应 48 B 每周期，约为 128 B 每周期峰值的百分之 37.5；均为示意估算而非实测。</desc>
+  <style>
+    text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #eaf1fa; }
+    .background { fill: #0c1628; }
+    .panel { fill: #17283e; stroke: #39506b; stroke-width: 1.5; }
+    .stat { fill: #203650; stroke: #476789; stroke-width: 1.5; }
+    .a { fill: #234a71; stroke: #8bc6ff; stroke-width: 2; }
+    .b { fill: #20585c; stroke: #75ddc9; stroke-width: 2; }
+    .c { fill: #382d56; stroke: #bda2ee; stroke-width: 2; }
+    .guide { stroke: #cbb2f1; stroke-width: 1.6; stroke-dasharray: 6 6; }
+    .arrow-a { stroke: #8bc6ff; stroke-width: 2.5; fill: none; marker-end: url(#tip-a); }
+    .arrow-b { stroke: #75ddc9; stroke-width: 2.5; fill: none; marker-end: url(#tip-b); }
+    .heading { font-size: 26px; font-weight: 700; }
+    .subheading { font-size: 18px; font-weight: 700; }
+    .stat-value { font-size: 19px; font-weight: 700; }
+    .label { font-size: 17px; font-weight: 600; }
+    .small { font-size: 14px; fill: #bbccdc; }
+    .note { font-size: 15px; fill: #a9bfd5; }
+  </style>
+  <defs>
+    <marker id="tip-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#8bc6ff"/></marker>
+    <marker id="tip-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#75ddc9"/></marker>
+  </defs>
+  <rect class="background" width="1240" height="790" rx="18"/>
+  <text class="heading" x="35" y="46">v1 · 单 CTA 256×256：A/B 共用 LDS，四个 wave 累加 C</text>
+  <text class="note" x="36" y="73">仅画当前 K 步；A、B 显存中 K 连续。下方将 B 转置成 Bᵀ 方便观察 A × Bᵀ → C。</text>
+
+  <rect class="stat" x="35" y="93" width="360" height="86" rx="11"/>
+  <text class="small" x="51" y="116">CTA / wave 切分</text>
+  <text class="stat-value" x="51" y="140">C 256×256 · 4 wave</text>
+  <text class="small" x="51" y="163">2×2 分块，每 wave 128×128</text>
+  <rect class="stat" x="405" y="93" width="360" height="86" rx="11"/>
+  <text class="small" x="421" y="116">每个 K 步 BK = 64</text>
+  <text class="stat-value" x="421" y="140">A/B 各 256×64 BF16</text>
+  <text class="small" x="421" y="163">每块 32 KiB LDS</text>
+  <rect class="stat" x="775" y="93" width="430" height="86" rx="11"/>
+  <text class="small" x="791" y="116">片上共享存储</text>
+  <text class="stat-value" x="791" y="145">A + B = 64 KiB：占满本例 LDS</text>
+
+  <text class="subheading" x="428" y="203">Bᵀ：K × N（逻辑视图） · 当前 BK = 64</text>
+  <rect class="b" x="426" y="216" width="640" height="100" rx="4"/>
+  <line class="guide" x1="746" y1="216" x2="746" y2="316"/>
+  <text class="label" x="533" y="258">B 左半 · N = 128</text>
+  <text class="small" x="537" y="287">wave 0 / 1 复用</text>
+  <text class="label" x="852" y="258">B 右半 · N = 128</text>
+  <text class="small" x="855" y="287">wave 2 / 3 复用</text>
+  <text class="note" x="1082" y="254">64 K</text>
+
+  <text class="subheading" x="155" y="311">A：M × K</text>
+  <rect class="a" x="155" y="340" width="160" height="300" rx="4"/>
+  <line class="guide" x1="155" y1="490" x2="315" y2="490"/>
+  <text class="label" x="171" y="411">A 上半</text>
+  <text class="small" x="171" y="440">M = 128</text>
+  <text class="small" x="171" y="464">wave 0 / 2</text>
+  <text class="label" x="171" y="558">A 下半</text>
+  <text class="small" x="171" y="587">M = 128</text>
+  <text class="small" x="171" y="611">wave 1 / 3</text>
+  <text class="note" x="166" y="665">← BK = 64 →</text>
+  <path class="arrow-a" d="M318 414 H413"/>
+  <path class="arrow-a" d="M318 566 H413"/>
+  <path class="arrow-b" d="M584 318 V335"/>
+  <path class="arrow-b" d="M906 318 V335"/>
+
+  <text class="subheading" x="437" y="688">C：M × N = 256×256 · 全程累加在各 wave 的 AGPR</text>
+  <rect class="c" x="426" y="340" width="640" height="300" rx="4"/>
+  <line class="guide" x1="746" y1="340" x2="746" y2="640"/>
+  <line class="guide" x1="426" y1="490" x2="1066" y2="490"/>
+  <text class="subheading" x="533" y="402">wave 0</text>
+  <text class="small" x="514" y="434">A 上半 × B 左半</text>
+  <text class="small" x="530" y="463">128×128 · AGPR</text>
+  <text class="subheading" x="852" y="402">wave 2</text>
+  <text class="small" x="835" y="434">A 上半 × B 右半</text>
+  <text class="small" x="850" y="463">128×128 · AGPR</text>
+  <text class="subheading" x="533" y="553">wave 1</text>
+  <text class="small" x="514" y="585">A 下半 × B 左半</text>
+  <text class="small" x="530" y="614">128×128 · AGPR</text>
+  <text class="subheading" x="852" y="553">wave 3</text>
+  <text class="small" x="835" y="585">A 下半 × B 右半</text>
+  <text class="small" x="850" y="614">128×128 · AGPR</text>
+
+  <rect class="panel" x="35" y="708" width="1170" height="66" rx="11"/>
+  <text class="label" x="50" y="733">理想 L2 强度：8,388,608 FLOP ÷ 64 KiB 逻辑输入 = 128 FLOP/B（v0 的两倍）</text>
+  <text class="small" x="50" y="758">LDS 每步 64 KiB 写 + 128 KiB 读 = 192 KiB；按 4,096 理想计算周期估算约 48 B/cycle（峰值 128 B/cycle 的 37.5%），非实测。</text>
+</svg>

@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 706" role="img" aria-labelledby="title desc">
+  <title id="title">MFMA 16×16×16 BF16：64 个 lane 的操作数与累加器排布</title>
+  <desc id="desc">左侧用四个彩色纵向 K 组表示 A 的每一行由 lane r、r+16、r+32、r+48 各提供四个 BF16；B 把行解释为 N。右侧用四个彩色横向 M 组表示 C 每个 lane 保存同一列中连续四行的 FP32 累加结果。选取行 0、1、2、15 和列 0、1、2、15 展示具体 lane 号，其余按公式生成。</desc>
+  <style>
+    text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #edf3fa; }
+    .bg { fill: #0c1628; } .panel { fill: #17283e; stroke: #39506b; stroke-width: 1.5; }
+    .heading { font-size: 26px; font-weight: 700; } .sub { font-size: 19px; font-weight: 700; }
+    .body { font-size: 16px; } .muted { fill: #b7c9dc; font-size: 15px; }
+    .tiny { fill: #a7bdd3; font-size: 13px; }
+    .group0 { fill: #234a71; stroke: #8bc6ff; } .group1 { fill: #234f58; stroke: #75ddc9; }
+    .group2 { fill: #554433; stroke: #f0c27b; } .group3 { fill: #48365f; stroke: #cfb1f5; }
+    .cell { stroke-width: 1.4; } .pill { font-size: 17px; font-weight: 700; text-anchor: middle; }
+    .separator { stroke: #61809b; stroke-width: 1; stroke-dasharray: 4 5; }
+    .arrow { fill: none; stroke: #adc8e7; stroke-width: 2; marker-end: url(#tip); }
+    .formula { fill: #1d344c; stroke: #577496; stroke-width: 1.4; }
+  </style>
+  <defs><marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#adc8e7"/></marker></defs>
+  <rect class="bg" width="1240" height="706" rx="18"/>
+  <text class="heading" x="38" y="46">MFMA：同一个 wave64，输入和输出的 lane 布局不同</text>
+  <text class="muted" x="39" y="77">一条 v_mfma_f32_16x16x16_bf16：A/B 各 16×16 BF16 → C 的 16×16 FP32 累加器</text>
+
+  <rect class="panel" x="34" y="101" width="575" height="483" rx="14"/>
+  <text class="sub" x="54" y="138">A / B：每个 lane 提供 4 个 K 元素</text>
+  <text class="muted" x="54" y="164">A 行 r（B 则是 N 行），沿 K 分给 4 个 lane 组</text>
+  <text class="tiny" x="62" y="215">行 r</text>
+  <text class="tiny" x="154" y="215">K 0–3</text><text class="tiny" x="262" y="215">K 4–7</text>
+  <text class="tiny" x="371" y="215">K 8–11</text><text class="tiny" x="473" y="215">K 12–15</text>
+  <!-- Each column repeats this mapping for all 16 rows; the four sample rows expose the lane IDs. -->
+  <rect class="group0 cell" x="140" y="231" width="98" height="260" rx="7"/>
+  <rect class="group1 cell" x="246" y="231" width="98" height="260" rx="7"/>
+  <rect class="group2 cell" x="352" y="231" width="98" height="260" rx="7"/>
+  <rect class="group3 cell" x="458" y="231" width="98" height="260" rx="7"/>
+  <path class="separator" d="M53 287 H557 M53 343 H557 M53 399 H557 M53 455 H557"/>
+  <text class="body" x="72" y="265">r = 0</text>
+  <text class="body" x="72" y="321">r = 1</text>
+  <text class="body" x="72" y="377">r = 2</text>
+  <text class="muted" x="81" y="433">⋮</text>
+  <text class="body" x="65" y="475">r = 15</text>
+  <text class="pill" x="189" y="265">L0</text><text class="pill" x="295" y="265">L16</text><text class="pill" x="401" y="265">L32</text><text class="pill" x="507" y="265">L48</text>
+  <text class="pill" x="189" y="321">L1</text><text class="pill" x="295" y="321">L17</text><text class="pill" x="401" y="321">L33</text><text class="pill" x="507" y="321">L49</text>
+  <text class="pill" x="189" y="377">L2</text><text class="pill" x="295" y="377">L18</text><text class="pill" x="401" y="377">L34</text><text class="pill" x="507" y="377">L50</text>
+  <text class="pill" x="189" y="475">L15</text><text class="pill" x="295" y="475">L31</text><text class="pill" x="401" y="475">L47</text><text class="pill" x="507" y="475">L63</text>
+  <rect class="formula" x="52" y="510" width="540" height="53" rx="8"/>
+  <text class="body" x="68" y="543">lane = r + 16 × K组号，组号 = 0, 1, 2, 3</text>
+
+  <path class="arrow" d="M612 337 H628"/>
+  <rect class="panel" x="629" y="101" width="577" height="483" rx="14"/>
+  <text class="sub" x="649" y="138">C：每个 lane 持有 4 个同列 FP32</text>
+  <text class="muted" x="649" y="164">四个连续的 M 行被一个 lane 保存为累加向量</text>
+  <text class="tiny" x="650" y="215">M 行</text>
+  <text class="tiny" x="752" y="215">N = 0</text><text class="tiny" x="851" y="215">N = 1</text>
+  <text class="tiny" x="948" y="215">N = 2</text><text class="tiny" x="1048" y="215">… N = 15</text>
+  <rect class="group0 cell" x="750" y="231" width="436" height="56" rx="7"/>
+  <rect class="group1 cell" x="750" y="299" width="436" height="56" rx="7"/>
+  <rect class="group2 cell" x="750" y="367" width="436" height="56" rx="7"/>
+  <rect class="group3 cell" x="750" y="435" width="436" height="56" rx="7"/>
+  <path class="separator" d="M844 232 V490 M941 232 V490 M1038 232 V490"/>
+  <text class="body" x="650" y="266">M 0–3</text><text class="body" x="650" y="334">M 4–7</text>
+  <text class="body" x="650" y="402">M 8–11</text><text class="body" x="650" y="470">M 12–15</text>
+  <text class="pill" x="797" y="266">L0</text><text class="pill" x="894" y="266">L1</text><text class="pill" x="991" y="266">L2</text><text class="pill" x="1110" y="266">L15</text>
+  <text class="pill" x="797" y="334">L16</text><text class="pill" x="894" y="334">L17</text><text class="pill" x="991" y="334">L18</text><text class="pill" x="1110" y="334">L31</text>
+  <text class="pill" x="797" y="402">L32</text><text class="pill" x="894" y="402">L33</text><text class="pill" x="991" y="402">L34</text><text class="pill" x="1110" y="402">L47</text>
+  <text class="pill" x="797" y="470">L48</text><text class="pill" x="894" y="470">L49</text><text class="pill" x="991" y="470">L50</text><text class="pill" x="1110" y="470">L63</text>
+  <rect class="formula" x="647" y="510" width="541" height="53" rx="8"/>
+  <text class="body" x="662" y="543">lane = N列号 + 16 × ⌊M / 4⌋</text>
+
+  <rect class="formula" x="34" y="606" width="1172" height="73" rx="12"/>
+  <text class="body" x="54" y="637">一次 16 B load / lane = 连续 8 个 BF16：前 4 个供一条 K=16 MFMA，后 4 个供下一条。</text>
+  <text class="muted" x="54" y="663">A 和 B 使用相同 K 重排；所以两条 MFMA 合起来覆盖 32 个 K，结果寄存器的 lane 布局不变。</text>
+</svg>

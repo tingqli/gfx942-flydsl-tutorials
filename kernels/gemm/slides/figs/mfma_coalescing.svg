@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 748" role="img" aria-labelledby="title desc">
+  <title id="title">v0 与 v1 的 BF16 显存加载：每条 128 B cache line 的利用率</title>
+  <desc id="desc">v0 直接按 MFMA lane 排布读显存，每行四个 lane 分别取连续 16 B，共使用 128 B cache line 中的前 64 B；64 个 lane 分布在 16 行，因此要触及 16 条 line。v1 搬运时 8 个相邻 lane 读取一行的 8 段连续 16 B，完整占用每条 128 B line；64 个 lane 覆盖 8 行，因此触及 8 条 line。下方绘制代表性的行，省略号代表剩余行而非缺失的数据。图示以 K 连续、128 B line 对齐为例，不等于实际 DRAM 流量。</desc>
+  <style>
+    text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #edf3fa; }
+    .background { fill: #0c1628; } .panel { fill: #17283e; stroke: #39506b; stroke-width: 1.5; }
+    .title { font-size: 26px; font-weight: 700; } .sub { font-size: 20px; font-weight: 700; }
+    .label { font-size: 16px; font-weight: 600; } .small { font-size: 14px; fill: #b7c9dc; }
+    .pill { font-size: 15px; font-weight: 700; text-anchor: middle; }
+    .used-v0 { fill: #315784; stroke: #97caff; stroke-width: 1.4; }
+    .used-v1 { fill: #276663; stroke: #8eebd8; stroke-width: 1.4; }
+    .unused { fill: #222b3b; stroke: #5b6b80; stroke-width: 1.1; }
+    .metric0 { fill: #3c3656; stroke: #c9abf2; stroke-width: 1.5; }
+    .metric1 { fill: #204844; stroke: #8eebd8; stroke-width: 1.5; }
+    .thin { stroke: #607995; stroke-width: 1.2; }
+  </style>
+  <rect class="background" width="1240" height="748" rx="18"/>
+  <text class="title" x="37" y="46">相同 16 B / lane，不同 lane→地址映射：v1 每次用满 cache line</text>
+  <text class="small" x="39" y="75">一条 64-lane load；A / B 都是 [行, K]、K 连续。每条横条 = 一行对应的一条 128 B cache line，分为 8 个 16 B 段。</text>
+
+  <rect class="panel" x="35" y="98" width="1170" height="283" rx="13"/>
+  <text class="sub" x="53" y="133">v0 · 直接按 MFMA 排布读 A/B</text>
+  <text class="small" x="53" y="158">lane = row + 16 × K段号；四个 lane 虽落在同一行，但只用前 64 B。相邻 lane 在不同的行。</text>
+  <rect class="metric0" x="974" y="111" width="210" height="55" rx="9"/>
+  <text class="label" x="989" y="134">16 行 / 16 条 line</text>
+  <text class="small" x="989" y="153">每条使用 64 / 128 B</text>
+  <text class="small" x="57" y="197">行 / lane</text>
+  <text class="small" x="270" y="197">K 0–31（本 K 步使用）</text>
+  <text class="small" x="748" y="197">K 32–63（本 K 步未用）</text>
+  <!-- Four representative rows; one column of lanes per 16 B segment. -->
+  <text class="label" x="59" y="231">row 0</text>
+  <text class="label" x="59" y="263">row 1</text>
+  <text class="small" x="74" y="295">⋮</text>
+  <text class="label" x="59" y="327">row 15</text>
+  <g>
+    <rect class="used-v0" x="230" y="207" width="116" height="30" rx="4"/><rect class="used-v0" x="350" y="207" width="116" height="30" rx="4"/><rect class="used-v0" x="470" y="207" width="116" height="30" rx="4"/><rect class="used-v0" x="590" y="207" width="116" height="30" rx="4"/>
+    <rect class="unused" x="710" y="207" width="116" height="30" rx="4"/><rect class="unused" x="830" y="207" width="116" height="30" rx="4"/><rect class="unused" x="950" y="207" width="116" height="30" rx="4"/><rect class="unused" x="1070" y="207" width="116" height="30" rx="4"/>
+    <rect class="used-v0" x="230" y="239" width="116" height="30" rx="4"/><rect class="used-v0" x="350" y="239" width="116" height="30" rx="4"/><rect class="used-v0" x="470" y="239" width="116" height="30" rx="4"/><rect class="used-v0" x="590" y="239" width="116" height="30" rx="4"/>
+    <rect class="unused" x="710" y="239" width="116" height="30" rx="4"/><rect class="unused" x="830" y="239" width="116" height="30" rx="4"/><rect class="unused" x="950" y="239" width="116" height="30" rx="4"/><rect class="unused" x="1070" y="239" width="116" height="30" rx="4"/>
+    <rect class="used-v0" x="230" y="303" width="116" height="30" rx="4"/><rect class="used-v0" x="350" y="303" width="116" height="30" rx="4"/><rect class="used-v0" x="470" y="303" width="116" height="30" rx="4"/><rect class="used-v0" x="590" y="303" width="116" height="30" rx="4"/>
+    <rect class="unused" x="710" y="303" width="116" height="30" rx="4"/><rect class="unused" x="830" y="303" width="116" height="30" rx="4"/><rect class="unused" x="950" y="303" width="116" height="30" rx="4"/><rect class="unused" x="1070" y="303" width="116" height="30" rx="4"/>
+  </g>
+  <text class="pill" x="288" y="228">L0</text><text class="pill" x="408" y="228">L16</text><text class="pill" x="528" y="228">L32</text><text class="pill" x="648" y="228">L48</text>
+  <text class="pill" x="288" y="260">L1</text><text class="pill" x="408" y="260">L17</text><text class="pill" x="528" y="260">L33</text><text class="pill" x="648" y="260">L49</text>
+  <text class="pill" x="288" y="324">L15</text><text class="pill" x="408" y="324">L31</text><text class="pill" x="528" y="324">L47</text><text class="pill" x="648" y="324">L63</text>
+  <text class="small" x="53" y="363">本指令总共 64 lane：16 行 × 每行 4 lane；本步用到每条 line 的一半（下一 K 步读另一半）。</text>
+
+  <rect class="panel" x="35" y="397" width="1170" height="280" rx="13"/>
+  <text class="sub" x="53" y="432">v1 · 先按连续地址搬进寄存器，再写 LDS</text>
+  <text class="small" x="53" y="457">st_c = tid % 8，st_r = tid // 8：8 个相邻 lane 读同一行的 8 个连续 16 B 段。</text>
+  <rect class="metric1" x="974" y="410" width="210" height="55" rx="9"/>
+  <text class="label" x="989" y="433">8 行 / 8 条 line</text>
+  <text class="small" x="989" y="452">每条使用 128 / 128 B</text>
+  <text class="small" x="57" y="494">行 / lane</text>
+  <text class="small" x="410" y="494">K 0–63：一条完整 128 B cache line</text>
+  <text class="label" x="59" y="532">row 0</text>
+  <text class="label" x="59" y="569">row 1</text>
+  <text class="small" x="74" y="602">⋮</text>
+  <text class="label" x="59" y="633">row 7</text>
+  <!-- Each complete line has eight coalesced 16 B vector loads. -->
+  <g>
+    <rect class="used-v1" x="230" y="506" width="116" height="32" rx="4"/><rect class="used-v1" x="350" y="506" width="116" height="32" rx="4"/><rect class="used-v1" x="470" y="506" width="116" height="32" rx="4"/><rect class="used-v1" x="590" y="506" width="116" height="32" rx="4"/><rect class="used-v1" x="710" y="506" width="116" height="32" rx="4"/><rect class="used-v1" x="830" y="506" width="116" height="32" rx="4"/><rect class="used-v1" x="950" y="506" width="116" height="32" rx="4"/><rect class="used-v1" x="1070" y="506" width="116" height="32" rx="4"/>
+    <rect class="used-v1" x="230" y="543" width="116" height="32" rx="4"/><rect class="used-v1" x="350" y="543" width="116" height="32" rx="4"/><rect class="used-v1" x="470" y="543" width="116" height="32" rx="4"/><rect class="used-v1" x="590" y="543" width="116" height="32" rx="4"/><rect class="used-v1" x="710" y="543" width="116" height="32" rx="4"/><rect class="used-v1" x="830" y="543" width="116" height="32" rx="4"/><rect class="used-v1" x="950" y="543" width="116" height="32" rx="4"/><rect class="used-v1" x="1070" y="543" width="116" height="32" rx="4"/>
+    <rect class="used-v1" x="230" y="607" width="116" height="32" rx="4"/><rect class="used-v1" x="350" y="607" width="116" height="32" rx="4"/><rect class="used-v1" x="470" y="607" width="116" height="32" rx="4"/><rect class="used-v1" x="590" y="607" width="116" height="32" rx="4"/><rect class="used-v1" x="710" y="607" width="116" height="32" rx="4"/><rect class="used-v1" x="830" y="607" width="116" height="32" rx="4"/><rect class="used-v1" x="950" y="607" width="116" height="32" rx="4"/><rect class="used-v1" x="1070" y="607" width="116" height="32" rx="4"/>
+  </g>
+  <text class="pill" x="288" y="527">L0</text><text class="pill" x="408" y="527">L1</text><text class="pill" x="528" y="527">L2</text><text class="pill" x="648" y="527">L3</text><text class="pill" x="768" y="527">L4</text><text class="pill" x="888" y="527">L5</text><text class="pill" x="1008" y="527">L6</text><text class="pill" x="1128" y="527">L7</text>
+  <text class="pill" x="288" y="564">L8</text><text class="pill" x="408" y="564">L9</text><text class="pill" x="528" y="564">L10</text><text class="pill" x="648" y="564">L11</text><text class="pill" x="768" y="564">L12</text><text class="pill" x="888" y="564">L13</text><text class="pill" x="1008" y="564">L14</text><text class="pill" x="1128" y="564">L15</text>
+  <text class="pill" x="288" y="628">L56</text><text class="pill" x="408" y="628">L57</text><text class="pill" x="528" y="628">L58</text><text class="pill" x="648" y="628">L59</text><text class="pill" x="768" y="628">L60</text><text class="pill" x="888" y="628">L61</text><text class="pill" x="1008" y="628">L62</text><text class="pill" x="1128" y="628">L63</text>
+  <text class="small" x="53" y="662">本指令总共 64 lane：8 行 × 每行 8 lane；每次读入 8 行的完整 K=64 tile，再在 LDS 中重排供 MFMA。</text>
+
+  <text class="small" x="37" y="721">逻辑 cache-line 利用率示意：实际 cache hit、请求合并、跨步重用和 HBM 流量仍需以硬件计数器测量。</text>
+</svg>
