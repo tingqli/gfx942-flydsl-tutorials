@@ -15,6 +15,7 @@ v1/v2 的 `M/256 × N/256 = 32 × 38 = 1216 = 4 × 304` 个 CTA，恰为按 MI30
 | [v2.py](v2.py) | v1 + 单 wave 软件流水（4 region、寄存器预取、`rocdl.sched_*` 调度提示） |
 | [bench.py](bench.py) | 正确性 + 计时（含 `torch.matmul` 对照） |
 | [slides/](slides/) | 培训 PPT：`make_figs.py` 画图，`make_ppt.py` 生成 `CDNA3_GEMM_FlyDSL.pptx`，`measure.sh` 采数据 |
+| [slides/CDNA3_GEMM_README.pptx](slides/CDNA3_GEMM_README.pptx) | 本文的 21 页精简演示版；可用 [slides/make_readme_ppt.py](slides/make_readme_ppt.py) 重建（依赖见 [slides/requirements-readme-ppt.txt](slides/requirements-readme-ppt.txt)） |
 
 ```bash
 python3 bench.py                    # 所有版本：正确性 + TFLOPS
@@ -561,6 +562,8 @@ MI300X（CDNA3，2023）同代的对手是 Hopper（H100 2022 / H200 2024）。
 |---|---|---|
 | 计算单元 × 频率 | 304 CU × 2.1 GHz | 132 SM × ~1.83 GHz |
 | 每单元矩阵核 | 4 个 Matrix Core（每 SIMD 1 个） | 4 个 Tensor Core（每子分区 1 个） |
+| 每 CU/SM 向量寄存器文件（32-bit 槽） | 131,072 个（512 KiB VGPR 文件，含 AGPR 可用部分） | 65,536 个（256 KiB 统一寄存器文件） |
+| 每 CU/SM 共享存储容量 | 64 KiB LDS/CU | 最多 228 KiB shared memory/SM（单 CTA 最多 227 KiB） |
 | FP16/BF16 dense，FLOP / 单元 / cycle | **2048** | **4096** |
 | FP8 dense，FLOP / 单元 / cycle | 4096 | 8192 |
 | 整卡 BF16 dense | 1307 TFLOPS | 989 TFLOPS |
@@ -571,7 +574,7 @@ MI300X（CDNA3，2023）同代的对手是 Hopper（H100 2022 / H200 2024）。
 | 矩阵 / vector 算力比（BF16 矩阵 ÷ FP32 vector） | 16×（打包 8×） | 16× |
 | HBM | 5.3 TB/s（MI325X ~6 TB/s） | 3.35 TB/s（H100）/ 4.8 TB/s（H200） |
 
-以上算力按表头的**同一标称频率模型**逐行换算；H200 的频率与实际功耗状态另计，不宜把另一档频率下的 FP32/FP64 标称值和本表的 BF16 峰值直接相除。
+寄存器行比较的是**每 CU/SM 的物理寄存器文件总容量**，不是单个 lane/thread 可用的寄存器数；CDNA3 的 AGPR 与通用 VGPR 共享这 512 KiB 物理文件。容量参见 [AMD GPU 规格](https://rocm.docs.amd.com/en/latest/reference/gpu-arch-specs.html)和 [NVIDIA Hopper Tuning Guide](https://docs.nvidia.com/cuda/hopper-tuning-guide/index.html#occupancy)。以上算力按表头的**同一标称频率模型**逐行换算；H200 的频率与实际功耗状态另计，不宜把另一档频率下的 FP32/FP64 标称值和本表的 BF16 峰值直接相除。
 
 - 单个 CU 的矩阵算力是 Hopper 单个 SM 的一半。MI300X 整卡更高，是因为它有 304 个 CU，单元数是 H100 的 2.3 倍。
 - vector 算力同理：未打包时单个 CU 是 Hopper SM 的一半；两者矩阵 / vector 都是 16×。CDNA3 的 FP64 vector 是全速（与 FP32 未打包相同），整卡 FP64 远高于 H100。
@@ -607,3 +610,377 @@ MI300X（CDNA3，2023）同代的对手是 Hopper（H100 2022 / H200 2024）。
 | warp specialization + mbarrier + `setmaxnreg` | 没有部分 barrier 和运行时寄存器调整，不划算 | §3.0 |
 | 期望编译器自动把访存和 MMA 排开 | LLVM 不保证所需的交错，本例用 `rocdl.sched_*` 施加调度约束 | §3.7 |
 | 编译器自动利用 uniform datapath | 标量值要落在 SGPR（必要时 `readfirstlane`），否则占 VGPR 和 VALU | §1.0 |
+
+
+## 附录 C：第一性原理推导（First-principle derivation）四象限流水线
+
+从最基础、不可再简化的基本假设或公理出发，通过逻辑演绎得到结论，而不是依赖经验拟合、类比或现成的二级公式。
+
+下面只把硬件事实和前两章已经确定的 tile 当作前提，一步步推出软件流水的结构，最后再与 v2 对照。每一步都注明用到了哪些前提。文中的周期数都按 MFMA 不停顿的理想速度估算，不是实测值。
+
+## 前提（公理）
+
+**硬件**（数值见 §1.0、§2.0、§3.0 和 [AMD LDS 文档](https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/conceptual/cdna/pipeline-descriptions.html#local-data-share-lds)）
+
+| 编号 | 前提 |
+|---|---|
+| H1 | `v_mfma_f32_16x16x16_bf16` 占矩阵单元 16 cycle；操作数只能来自 VGPR / AGPR |
+| H2 | 每个 SIMD 每 4 cycle 轮到一次发射，同一个 wave 一次只发 1 条指令 |
+| H3 | 每 lane 最多 256 VGPR + 256 AGPR，数量在编译期固定 |
+| H4 | LDS 每 CU 64 KiB；每两个 SIMD 共用一个端口，每方向 64 B/cycle：一条 `ds_read_b128`（1 KiB）约占端口 16 cycle，一条 `ds_write_b128` 约 20 cycle |
+| H5 | global → LDS 没有宽的直通路径，数据必须经过 VGPR |
+| H6 | 跨 wave 同步只有全 CTA 的 `s_barrier`；`vmcnt` 按发射顺序计数，只能等“最老的若干条” |
+| H7 | 延迟量级（估计）：global load 数百～上千 cycle，LDS 读约百 cycle |
+| H8 | 一行 128 B 由 8 个相邻 lane 各读 16 B 时，一条 global load 恰好读满 8 条 cache line |
+
+**问题与已定的决定**（§1.3、§2.1）
+
+| 编号 | 前提 |
+|---|---|
+| P1 | CTA 算 256×256，共 4 个 wave；每个 wave 的 128×128 FP32 累加器占满 256 AGPR，因此每 SIMD 只有 1 个 wave |
+| P2 | BK = 64，A、B 都是 K 连续，tile 的一行正好 128 B；每个 K 步 A、B 各 32 KiB，合计 64 KiB |
+| G | 目标：稳态中 MFMA 单元不空闲 |
+
+## 推导 1：迭代时长与瓶颈（H1、H2、H4、P1、P2）
+
+把一个 K 步当作一次迭代。每个 wave 每步要做：
+
+| 操作 | 条数 | 计算 |
+|---|---|---|
+| MFMA | 256 | (128/16) × (128/16) × (64/16) |
+| GR：global → 暂存 VGPR | 16 | CTA 共 64 KiB ÷ 每条 1 KiB（64 lane × 16 B）÷ 4 wave |
+| LW：暂存 → LDS | 16 | 同上 |
+| LR：LDS → 操作数 VGPR | 32 | 每个 wave 读 A、B 各 128 行 × 64 K × 2 B = 32 KiB |
+
+逐项检查资源：
+
+- **MFMA**：256 × 16 = **4096 cycle**。
+- **发射槽**：4096 / 4 = 1024 个；MFMA 用 256 个，访存 64 个，余量足以放地址计算和等待指令。
+- **LDS 端口**：每个端口服务 2 个 wave，每步占用 2 × (32 × 16 + 16 × 20) = 1664 cycle，约 41%。
+
+结论：一次迭代 **II = 4096 cycle**，瓶颈是 MFMA。设计问题由此变成：**把 64 条访存指令塞进 256 条 MFMA 之间，并保证每条 MFMA 用到的数据都已就绪**。
+
+## 推导 2：依赖链（H5、H6、H7）
+
+```text
+GR (global → 暂存 VGPR) → LW (暂存 → LDS) → barrier → LR (LDS → 操作数 VGPR) → MFMA
+        等显存延迟                      跨 wave 可见               等 LDS 延迟
+```
+
+- GR → LW：要等显存数据返回（H7）。
+- LW → LR：写数据的 wave 和读数据的 wave 不同，中间必须隔一个 barrier（H6）。
+- LR → MFMA：要等 LDS 数据返回（H7）。
+
+每条边都要求“提前量 ≥ 延迟”。提前多少不能随意定，而是由下一步的缓冲份数决定。
+
+## 推导 3：缓冲份数（H3、H4、P1、P2）
+
+一个值从产生到最后一次使用的时间称为生命周期 T。稳态下它同时存在 ⌈T / II⌉ 份副本，每一份都要占存储。先算一份的大小：
+
+| 存储 | 一份的大小 | 预算 | 能放几份 |
+|---|---|---|---|
+| 累加器 | 256 AGPR | 256 AGPR | 1（已满） |
+| 操作数（每 wave 一个 K 步） | 32 KiB ÷ (64 lane × 4 B) = 128 VGPR | 256 VGPR | 1 |
+| 暂存（整个 CTA 一个 K 步） | 64 KiB ÷ (256 lane × 4 B) = 64 VGPR | 剩余 128 VGPR | 1（其余留给地址和循环变量） |
+| LDS | 64 KiB | 64 KiB | 1 |
+
+“每种存储都只能放 1 份”直接推出以下结论：
+
+1. **LW 写 k+1**：LDS 只有一份，计算 k 时，LDS 中只能是 k，或正在被覆盖成 k+1。
+2. **GR 取 k+2**：暂存只有一份，必须等 LW(k+1) 把它读走才能装新数据，所以之后发出的 GR 只能取再下一块。
+3. **能容忍的显存延迟上限约为 1 个 II**：从 GR(k+2) 发出到下一步 LW(k+2) 使用，正好隔一个 K 步。延迟更长时需要第二份暂存（+64 VGPR），预算不够——这是本方案的性能边界。
+4. **不能整块轮换**：若把整个 K 块当作一个单位，LW(k+1) 之前必须让所有 wave 读完 k 的全部操作数。为了藏住下一步 LR 的延迟，又得在 DOT(k) 仍在使用旧操作数时就读入 k+1，这需要两份操作数：256 + 64 = 320 VGPR，超过 256。若不预读，每步开头就要集中读 32 KiB 操作数：仅 LDS 端口时间就约 1024 cycle（一个端口两个 wave 共 64 KiB ÷ 64 B/cycle），占 II 的 25%。
+
+**结论：必须把 tile 切成可以独立回收的小块，让“某块的旧值用完 → 立即覆盖”滚动进行。**
+
+## 推导 4：切分维度与 wave 划分（H3、H4、H8）
+
+切分方案要同时满足：
+
+- **C1**：每条 global load 仍读满 128 B 的行（H8）；
+- **C2**：不增加 `ds_write`，因为它最紧缺：每条约占 20 cycle 端口时间，比一条 MFMA 的 16 cycle 还长；
+- **C3**：寄存器不超预算（见推导 5 的间隔约束）；
+- **C4**：每个计算阶段里，4 个 wave 的 MFMA 数量相同。
+
+| 方案 | C1 | C2 | C3 | 结论 |
+|---|---|---|---|---|
+| 沿 K 切成两半（每块 256×32） | 若按半行加载：✗，一条指令读 16 行、每行只读半条 line | 若按整行加载：✗，每个 lane 的 16 B 只属于其中一半，写 LDS 时要按 lane 掩码分两次写，`ds_write` 条数翻倍 | ✓ | 两种加载方式分别违反 C1 或 C2 |
+| 只切 A（上 / 下），B 整块 | ✓ | ✓ | ✗：B 在两个相邻阶段都要用，无法提前重读，需两份 B 操作数：A 64 + B 128 + 暂存 64 = 256 VGPR，地址无处可放 | 不可行 |
+| A 切上 / 下，B 切左 / 右（4 块 × 16 KiB） | ✓：每块是 128 行完整的 128 B 行 | ✓：每块每 wave 4 条 `ds_write`，总数不变 | ✓（推导 5） | **采用** |
+| 更细的切分 | ✓ | ✓ | ✓ | 不必要；取满足约束的最粗切分 |
+
+4 块组成 C 的 4 个象限：`C_tl = A_top·B_left`、`C_bl = A_bot·B_left`、`C_tr = A_top·B_right`、`C_br = A_bot·B_right`。一个计算阶段（region）算一个象限。下文用 R0～R3 表示一个 K 步内的 4 个 region。
+
+**wave 划分必须与 region 正交（C4）。**若沿用 v1 的“一个 wave 负责一个象限”，每个 region 只有一个 wave 在算，另外三个 SIMD 都空着。所以每个 wave 要在每个象限各算一块：
+
+| 象限内的划分 | 每 wave 每步读 LDS | 操作数 VGPR | 结论 |
+|---|---|---|---|
+| 2×2，每块 64×64 | A 128 行 + B 128 行 = 32 KiB | 128 | 采用 |
+| 4×1，每块 32×128 | A 64 行 + B 256 行 = 40 KiB | 160 | 读量多 25%，且超预算 |
+
+于是 wave (wm, wn) 在每个象限中取第 wm 个 64 行和第 wn 个 64 列。每个 region、每个 wave 做 64 条 MFMA（(64/16)² × 4），用到一块 A 操作数（32 VGPR）和一块 B 操作数（32 VGPR）。
+
+## 推导 5：region 顺序（H3、H7）
+
+把一个 K 步内的 4 个 region 编号为 0～3，下一步为 4～7。每块在一个 K 步中被两个象限使用，位置记为 i < j；下一步它第一次被使用的位置是 i + 4。读入下一块的 LR 必须放在某个 region r 中，满足 j < r < i + 4：
+
+- r > j：旧值仍在被 MFMA 读取，不能覆盖它的寄存器；
+- r < i + 4：要在使用之前，并留至少一个 region 的时间藏 LDS 延迟（H7）。
+
+所以必须有 **(i + 4) − j ≥ 2**，即 **j − i ≤ 2**：同一块不能同时在 R0 和 R3 使用。换句话说，**第一个和最后一个 region 必须是对角象限**。24 种顺序里满足条件的有 8 种，它们只在 A / B、上下、左右的标号上互相对称：
+
+| 顺序 | 是否可行 | 原因 |
+|---|---|---|
+| tl → bl → tr → br（列优先） | ✓ | 首尾对角 |
+| tl → tr → bl → br（行优先） | ✓ | 首尾对角 |
+| tl → bl → br → tr（蛇形） | ✗ | A_top 在 R0 和 R3 都要用 |
+
+下面取 tl → bl → tr → br。每块 LR 的可放位置为：
+
+| 块 | 本步使用 | LR 窗口 | 平衡后（每个 region 恰好一次 LR） |
+|---|---|---|---|
+| A_bot | R1、R3 | 上一步 R3 之后、本步 R1 之前 → 只能 R0 | R0：A_bot(k) |
+| B_right | R2、R3 | 上一步 R3 之后、本步 R2 之前 → R0 或 R1 | R1：B_right(k) |
+| B_left | R0、R1 | 本步 R1 之后、下一步 R0 之前 → R2 或 R3 | R2：B_left(k+1) |
+| A_top | R0、R2 | 本步 R2 之后、下一步 R0 之前 → 只能 R3 | R3：A_top(k+1) |
+
+检查操作数寄存器的峰值（每块 32 VGPR）：
+
+| region | 正在使用 | 正在读入 | 其余仍存活 | 合计 |
+|---|---|---|---|---|
+| R0 | A_top(k)、B_left(k) | A_bot(k) | — | 3 块 |
+| R1 | A_bot(k)、B_left(k) | B_right(k) | A_top(k) | 4 块 |
+| R2 | A_top(k)、B_right(k) | B_left(k+1) | A_bot(k) | 4 块 |
+| R3 | A_bot(k)、B_right(k) | A_top(k+1) | B_left(k+1) | 4 块 |
+
+峰值 4 块 = 128 VGPR，正好是一份操作数，满足推导 3 的预算。
+
+## 推导 6：barrier 数量与 LW / GR 位置（H6，LDS 只有 1 份）
+
+每个 LDS 块在每个 K 步都要经历：
+
+```text
+最后一次读旧值 → barrier → 写新值（LW） → barrier → 第一次读新值
+```
+
+每个 wave 都会写每块的一部分，也会读其它 wave 写入的部分，所以“读旧值 → 写新值”（WAR）和“写新值 → 读新值”（RAW）都跨 wave，各需要一个 barrier。
+
+**下界**：同一块的两次读，是同一个 LR 在相邻两步中的执行，正好相隔 4 个 region。若每步只有 b 个 barrier，任何长度为 4 个 region 的区间内只有 b 个 barrier；而两次读之间需要 2 个，所以 **b ≥ 2**。
+
+取 b = 2，放在 R1 之后（X）和 R3 之后（Y），把一个 K 步分成两半。这样每块的 LW 都落在同一个 K 步内，并恰好有两个候选 region：
+
+| 块 | 最后一次读旧值 | 第一次读新值 | 中间的 barrier | LW 可放 | 选取 |
+|---|---|---|---|---|---|
+| B_left | 上一步 R2 | 本步 R2 | 上一步 Y、本步 X | R0、R1 | **R0** |
+| A_top | 上一步 R3 | 本步 R3 | 上一步 Y、本步 X | R0、R1 | **R1** |
+| A_bot | 本步 R0 | 下一步 R0 | 本步 X、Y | R2、R3 | **R2** |
+| B_right | 本步 R1 | 下一步 R1 | 本步 X、Y | R2、R3 | **R3** |
+
+选取规则：
+
+1. **每个 region 只放一次 LW**，让 `ds_write` 均匀分布；
+2. **先读的先写**：B_left(k+1) 在 R2 被读，A_top(k+1) 在 R3 被读，所以 B_left 写在 R0，A_top 写在 R1；A_bot、B_right 同理。
+
+每块的 GR 紧跟在它的 LW 之后：LW 一读完暂存，暂存就空出来了。因此 GR 的发射顺序与 LW 相同（B_left、A_top、A_bot、B_right），也正好符合推导 3 的“GR 取 k+2”。
+
+## 推导结果：稳态时间表
+
+| region | DOT（当前 k） | LR | LW | GR |
+|---|---|---|---|---|
+| R0 | C_tl += A_top(k)·B_left(k) | A_bot(k) | B_left(k+1) | B_left(k+2) |
+| R1 | C_bl += A_bot(k)·B_left(k) | B_right(k) | A_top(k+1) | A_top(k+2) |
+| — | barrier X | | | |
+| R2 | C_tr += A_top(k)·B_right(k) | B_left(k+1) | A_bot(k+1) | A_bot(k+2) |
+| R3 | C_br += A_bot(k)·B_right(k) | A_top(k+1) | B_right(k+1) | B_right(k+2) |
+| — | barrier Y | | | |
+
+每个 region、每个 wave 包含 64 条 MFMA、8 条 `ds_read_b128`、4 条 `ds_write_b128` 和 4 条 `global_load_dwordx4`。
+
+这张表与 §3.3 完全一致：在上述约束和选取规则下，8 种对称的 region 顺序各对应一张时间表，v2 用的是其中之一。也就是说，v2 的结构可以由约束推出来，而不是靠经验拼凑。
+
+## 推导 7：由循环不变量生成代码（H6）
+
+**1. 写出循环不变量 I(k)。**在第 k 步的 R0 开始时：
+
+- LDS 的四块都是 tile k（上一步 R0～R3 写入，Y 之后对所有 wave 可见）；
+- 操作数寄存器里有 A_top(k)、B_left(k)（上一步 R3、R2 读入）；
+- 暂存里是 tile k+1 的四块（上一步发出的 GR）；
+- 累加器保存前 k 个 K 步的部分和。
+
+执行一遍稳态时间表后，正好得到 I(k+1)。
+
+**2. 循环携带的状态，就是不变量中保存在寄存器里的值**：64 个 f32x4 累加器、A_top 和 B_left 共 2 × 8 个 16 B 操作数向量，以及 16 个暂存向量。A_bot、B_right 在同一步内读入并用完，不需要跨迭代传递。
+
+**3. prologue 只负责建立 I(0)：**
+
+```text
+GR tile 0 → LW tile 0 → barrier                 # LDS 中是 tile 0，对所有 wave 可见
+GR tile 1（顺序：B_left, A_top, A_bot, B_right）   # 暂存中是 tile 1；可以提前发出以重叠延迟
+LR A_top(0)、B_left(0)
+barrier                                         # 所有 wave 读完 B_left(0)，R0 才能覆盖它
+```
+
+**4. 收尾：删除引用 tile ≥ NK 的操作**（NK = K / BK）：
+
+| 步 | GR | LW | 读下一步的操作数 | barrier |
+|---|---|---|---|---|
+| 0 … NK−3（循环） | ✓ | ✓ | ✓ | 2 个 |
+| NK−2 | ✗（k+2 越界） | ✓ | ✓ | 2 个 |
+| NK−1 | ✗ | ✗（k+1 越界） | ✗ | 不需要：之后不再写 LDS |
+
+**5. 稳态和收尾用同一个带“阶段开关”的 `kstep` 函数生成**，只用参数关闭越界阶段；prologue 的 GR 顺序也与循环保持一致。这样各段的 global load 发射顺序相同。`vmcnt` 按发射顺序计数（H6），顺序不一致时，编译器会在循环入口算出保守的等待值（§3.7）。
+
+## 推导 8：region 内的指令顺序（H1、H2、H4）
+
+每个 region 中，每个 wave 约有 1024 cycle、256 个发射槽：MFMA 用 64 个，访存用 16 个。在 region 内：
+
+1. **LR 最先发**：它的使用者在下一个 region，最需要时间。把 8 条 `ds_read` 放在前 16 条 MFMA 之间，最后一条之后还有 48 条 MFMA（约 768 cycle）才到使用点。
+2. **LW 其次**：数据在上一步就已开始读取，通常已经到达；同时它必须在发布它的 barrier 之前完成。
+3. **GR 最后**：它会覆盖暂存寄存器，必须等 LW 读完暂存（寄存器 WAR）。
+
+**间隔**：两个 SIMD 共用一个 LDS 端口，一次 `ds_read_b128` 约占 16 cycle。每个 wave 每 2 条 MFMA（32 cycle）发一次 LDS 操作时，两个 SIMD 合起来正好用满端口。`ds_write_b128` 约 20 cycle，两个 SIMD 同时写需要 40 cycle，超过 32 cycle，写阶段端口会轻微超载——与 §3.8 的结论一致：`ds_write` 是剩余的瓶颈。global load 每条 MFMA 后最多放一条，分散发射。
+
+按这个配比，一个 region 中有 8 × 2 + 4 × 2 + 4 × 1 = 28 条 MFMA 用来夹带访存，其余 36 条 MFMA 后面没有访存。编译器不会自动保证这种交错，需要用 `rocdl.sched_*` 显式约束（§3.7）。
+
+## 可检验的预测
+
+推导给出了可以在 ISA 和计数器中核对的具体结果：
+
+| 预测 | 来源 | 实测 / 对照 |
+|---|---|---|
+| 循环内有 256 条 MFMA、32 条 `ds_read_b128`、16 条 `ds_write_b128`、16 条 `global_load_dwordx4` 和 2 个 `s_barrier` | 推导 1、6 | §3.7 |
+| 每块的第一条 `ds_write` 前允许 15 条 global load 在途，后面依次为 14、13、12 | 推导 6、8：该块的 GR 发出后，又发出了 3 个 region × 4 = 12 条，再加本块剩余的 3 条 | §3.7 的 `vmcnt(15/14/13/12)` |
+| 循环内没有 scratch 读写 | 推导 3、5 的寄存器预算 | §3.6 |
+| L2 外部读取量与 v1 相近 | 流水只改变时间顺序，不改变每步读取的数据 | §4：1.24 GB vs 1.31 GB |
+
+如果 ISA 中的 `vmcnt` 远小于 12，说明流水在编译后被排空了，应首先检查 prologue 和循环中 GR 的发射顺序。
+
+## 前提改变时
+
+第一性原理推导的好处在于：前提一变，可以按同样的步骤重新推导，看结论哪里变了。
+
+| 改变的前提 | 推导中受影响的地方 | 新结论 |
+|---|---|---|
+| 显存延迟长于 1 个 II | 推导 3：暂存需要 2 份（+64 VGPR） | 预算不够，LW 前会等待；只能缩小 tile 或改用多 wave |
+| LDS 能放 2 份 tile，并有 16 B 的 global→LDS 直通（如 CDNA4，§3.0） | 推导 3、6：LDS 可以双缓冲，暂存 VGPR 可去掉；同一块两次读的间隔变为 2 个 K 步 | 每步 1 个 barrier 就满足下界；但 MFMA 操作数仍只能来自寄存器，推导 5 的 region 滚动依然需要 |
+| 矩阵吞吐翻倍，LDS 端口不变 | 推导 1：II 减半为 2048 cycle | LDS 端口占用升至约 81%，写入路径成为主要约束 |
+| 每 SIMD 2 个 wave（§5 inter_wave） | 推导 3：每个 wave 的寄存器减半，wave tile 随之缩小 | 可以用 TLP 交替隐藏延迟，时间表要按新的 tile 重新推导 |
+
+## 推导链一览
+
+| 设计决定 | 推导 | 依赖的前提 |
+|---|---|---|
+| II = 4096 cycle，瓶颈是 MFMA | 1 | H1、H2、H4、P1、P2 |
+| LW 写 k+1、GR 取 k+2；可容忍约 1 个 II 的显存延迟 | 3 | H3、H4、P1、P2 |
+| 必须切成可以独立回收的小块 | 3 | H3、H4、H7 |
+| A 切上 / 下、B 切左 / 右，共 4 块 16 KiB | 4 | H3、H4、H8 |
+| 每个 wave 在每个象限各算 64×64 | 4 | 负载均衡、LDS 读量最小 |
+| 首尾 region 为对角象限，LR 的位置 | 5 | H3、H7 |
+| 每步 2 个 barrier，位于 R1、R3 之后 | 6 | H6，LDS 只有 1 份 |
+| 各 region 中 LW / GR 的位置与发射顺序 | 6 | 均衡、先读先写 |
+| prologue、循环携带状态与收尾 | 7 | 循环不变量、H6 |
+| region 内按 LR → LW → GR 排序，LDS 操作间隔 2 条 MFMA | 8 | H1、H2、H4 |
+
+## 附录 D：分析TLP的可行性
+
+根据MI300X的mem-bound/compute-bound转折点对应的算术强度（Arithmetic Intensity），估计一下TLP遮盖是否可行，从而可以简化pipeline设计。
+
+分三步估计：先按实际频率算出各级存储的转折点；再看 TLP 让 tile 变小后，各级强度是否仍高于转折点（带宽够不够）；最后看一组 wave 访存时，另一组 wave 的 MFMA 能否把它盖住（延迟藏不藏得住）。以下数值按标称带宽和理想 MFMA 速度估算，不是实测。
+
+### D.1 频率：750 W 功耗墙
+
+MI300X 的标称峰值频率是 2.1 GHz，但整卡功耗上限为 750 W。MFMA 密集的 GEMM 会撞到功耗墙，实际主频往往只有约 1.2 GHz。
+
+| | 2.1 GHz（标称） | 1.2 GHz（功耗墙下常见） |
+|---|---|---|
+| BF16 dense 峰值：304 CU × 2048 FLOP/cycle × 频率 | 1307 TFLOPS | 747 TFLOPS |
+| 1 µs 的访存延迟折合 | 2100 cycle | 1200 cycle |
+| v2 的 649 TFLOPS 占峰值 | 50% | 87% |
+| `torch.matmul` 的 633 TFLOPS 占峰值 | 48% | 85% |
+
+- MFMA、LDS、L2 的能力都按 cycle 计，降频时一起变慢，彼此的比例不变。HBM 带宽按 TB/s 计，不随 GFX 主频下降，所以降频后**外存相对变快**：同样纳秒数的延迟，折合的 cycle 数只有 2.1 GHz 时的 57%。
+- [基准记录](slides/data/bench.txt) 没有保存频率。若测试时主频约 1.2 GHz，v2 已达到该频率峰值的 87%，任何新设计（包括 TLP）最多再快约 15%。频率要在负载运行时实测，例如用 `rocm-smi --showclocks` 查看 SCLK。
+
+### D.2 各级存储的转折点
+
+转折点 = 峰值算力 ÷ 该级带宽，单位 FLOP/B。kernel 在某一级的算术强度低于转折点，就受该级带宽限制；高于转折点时，该级带宽的占用约为“转折点 ÷ 强度”。
+
+| 层级 | 带宽 | 随 GFX 主频变化 | 转折点 @2.1 GHz | 转折点 @1.2 GHz |
+|---|---|---|---|---|
+| LDS | 128 B/cycle/CU | 是 | 16 | 16 |
+| L2 | 2 KiB/cycle/XCD，38 个 CU 共享（保守值） | 是 | 38 | 38 |
+| MALL（Infinity Cache） | 17.2 TB/s | 假设否 | 76 | 43 |
+| HBM3 | 5.3 TB/s | 否 | 247 | 141 |
+
+带宽来源：AMD 给出 L2↔XCD 合计 51.6 TB/s、Infinity Cache↔XCD 17.2 TB/s、HBM 5.3 TB/s（见 [ROCm 博客](https://rocm.blogs.amd.com/software-tools-optimization/cpx-rccl-tuner/README.html) 引用的 CDNA3 白皮书）。51.6 TB/s 是 L2 与 XCD 之间的合计值，在 2.1 GHz 下折合约 3 KiB/cycle/XCD；GEMM 几乎只读，这里保守地取 2 KiB/cycle/XCD。
+
+用 §4 的实测数据对照：
+
+- L2 之外的强度：v2 为 2·M·N·K ÷ 1.31 GB ≈ 1000 FLOP/B，远高于 HBM 转折点（141～247）。
+- L2 之外的读取速率：v0 128×128 为 5.59 GB ÷ 3863 µs ≈ 1.45 TB/s，v2 为 1.31 GB ÷ 2013 µs ≈ 0.65 TB/s，都远低于 5.3 TB/s。
+
+所以 v0～v2 都不受外存带宽限制，慢在等待和片上资源上——这正是 TLP 可能起作用的地方。
+
+### D.3 TLP 的代价：寄存器减半，tile 变小
+
+每个 SIMD 的寄存器文件固定为每 lane 512 个。每 SIMD 放 n 个 wave 时，每个 wave 最多只能用 512/n 个，累加器 tile 只能缩小：wave 层强度 `Wm·Wn/(Wm+Wn)` 下降，LDS 读量上升。
+
+| 方案 | wave/SIMD | 每 wave 寄存器上限 | wave tile | CTA tile（LDS） | 寄存器：累加器 + 操作数 + 暂存 | wave 层强度（FLOP/B） | LDS 端口占用 | L2 占用 |
+|---|---|---|---|---|---|---|---|---|
+| v2（ILP） | 1 | 512 | 128×128 | 256×256（64 KiB） | 256 + 128 + 64 | 64 | 41% | 30% |
+| A：1 CTA × 8 wave | 2 | 256 | 128×64 | 256×256（64 KiB） | 128 + 48 + 32（操作数每次读 32 个 K） | 43 | 53% | 30% |
+| B：每 CU 2 个 CTA × 4 wave | 2 | 256 | 64×64 | 128×128（各 32 KiB） | 64 + 32 + 32 | 32 | 81% | 59% |
+| C：1 CTA × 16 wave | 4 | 128 | 64×64 | 256×256（64 KiB） | 64 + 32 + 16，加上地址后接近 128 | 32 | 66% | 30% |
+| 8 wave/SIMD | 8 | 64 | 64×32 | — | 累加器 32 + 操作数 24，加上暂存和地址后超过 64 | 21 | — | — |
+
+计算方法（每个 CU 每推进 1 个 K，按理想 MFMA 速度）：
+
+- **LDS 端口占用** = (读字节 ÷ 128 B/cycle + 写字节 ÷ 102 B/cycle) ÷ MFMA 时间。写按 `ds_write_b128` 每 KiB 约 20 cycle 计（附录 C 的 H4）。例如方案 A：读 8 × (128 + 64) × 2 B = 3072 B，写 (256 + 256) × 2 B = 1024 B，MFMA 时间 2 × 256 × 256 ÷ 2048 = 64 cycle，占用 (24 + 10) ÷ 64 ≈ 53%。
+- **L2 占用** = CTA 读取的字节 ÷ 每个 CU 分到的 L2 带宽（2 KiB ÷ 38 ≈ 54 B/cycle）÷ MFMA 时间。CTA 为 256×256 时每个 K 读 1024 B，即 16 B/cycle，约占 30%。
+
+由此得到：
+
+- **外存不是约束。**保持 256×256 的 CTA（方案 A、C）时，L2 之外的流量与 v2 大致相同；即使改成 128×128 的 CTA（方案 B），流量粗估翻倍，强度约 500 FLOP/B，仍高于 HBM 转折点。
+- **LDS 端口是 TLP 的主要代价。**wave tile 越小，读量越大，端口占用从 41% 升到 53%～81%，逐渐逼近 16 FLOP/B 的转折点。这项成本按 cycle 计，**不会因降频而缓解**。
+- **寄存器决定 n 的上限。**2 wave/SIMD 可行，4 wave/SIMD 已到极限，8 wave/SIMD 不可行。
+
+带宽上最合适的是方案 A，它对应 §5 的 inter_wave（8 wave/CTA，每 SIMD 2 个 wave）。
+
+### D.4 延迟：另一组 wave 能否盖住访存
+
+以两组 wave 交替为例：一组算一个 K 步时，另一组完成这一轮的访存。MFMA 不停的条件是
+
+```text
+访存组的 LDS 端口时间 + 没被预取盖住的 global 时间 ≤ 计算组一个 K 步的 MFMA 时间
+```
+
+其中 global 时间指一批 global load 从发出到全部返回的时间，包括延迟和传输。一组 wave 每轮在一个 CU 上要读 32 KiB，即使延迟为 0，按每个 CU 分到的 L2 带宽（约 54 B/cycle）传输也要约 600 cycle。
+
+| 方案 | 计算组一个 K 步 | 访存组 LDS 端口时间 | 留给 global 的时间 | 不预取 | 预取 1 轮 |
+|---|---|---|---|---|---|
+| A | 128 MFMA = 2048 cycle | 2 × (24 × 16 + 8 × 20) = 1088 cycle | 960 cycle | 扣除约 600 cycle 传输后，只剩约 360 cycle（1.2 GHz 下 0.3 µs）给延迟，基本只够 L2 命中 | 可容忍约一轮，即 4096 cycle（1.2 GHz 下 3.4 µs） |
+| B | 64 MFMA = 1024 cycle | 2 × (16 × 16 + 8 × 20) = 832 cycle | 192 cycle | 连传输都放不下，不可行 | 每个阶段只余 192 cycle，且两个 CTA 互不协调，可能同时进入访存阶段 |
+
+LDS 端口时间按一个端口上两个访存 wave 计，并假设 LR 全部放在访存阶段，偏保守。
+
+- 方案 A 应保留 1 步寄存器预取（每 wave 32 VGPR 暂存，已计入 D.3）。有了它，无论在功耗墙下还是标称频率下，global 延迟都有充足余量。
+- 方案 B 就是“只把 occupancy 提到 2、代码保持 v1 结构”。按上表，不预取时它藏不住 global 延迟，加了预取也只剩很小的余量，预计达不到 v2 的效率。
+- 由 Little 定律，在途数据量 = 需求带宽 × 延迟：256×256 的 CTA 每个 CU 每 cycle 需要 16 B，延迟 1000 cycle 时约有 16 KiB 在途。CDNA3 的 global load 先落到 VGPR，这部分寄存器 TLP 和 ILP 都要付；TLP 改变的只是由谁、按什么顺序发出访存。
+
+### D.5 TLP 能替代 v2 的哪些结构
+
+| v2 中的结构 | 作用 | 方案 A 中 |
+|---|---|---|
+| GR 提前 2 步，64 VGPR 暂存 | 藏 global 延迟 | 减为提前 1 步（每 wave 32 VGPR） |
+| 4 象限 region 滚动，LR 提前一个 region | 藏 LDS 延迟，压低操作数寄存器峰值 | 不需要：另一组 wave 的 MFMA 盖住 LDS 延迟 |
+| `rocdl.sched_*` 的 region 内配比 | 把访存塞进 MFMA 之间的空隙 | 大部分不需要：每个发射周期可以从不同 wave 各发一条不同类型的指令（§3.0），MFMA 和 ds 指令可以同拍发出 |
+| `ds_write` 盖不住（§3.8） | 单 wave 内的固有瓶颈 | 不再挡住 MFMA：`ds_write` 由访存组发出，不占计算组的发射 |
+| 每步 2 个全 CTA barrier | LDS 跨 wave 读写同步 | **仍然需要**，而且 barrier 会把两组 wave 拉齐；要让两组错相，需要额外编排 barrier 位置和 `s_setprio`（§5 inter_wave） |
+
+### D.6 结论
+
+1. **带宽上可行。**外存强度约 1000 FLOP/B，远高于 HBM 转折点（2.1 GHz 下 247，1.2 GHz 下 141）。2 wave/SIMD 且保持 256×256 CTA 时，L2 占用约 30%，LDS 端口从 41% 升到 53%。限制 TLP 的是寄存器（2 wave/SIMD 较宽松）和 LDS 端口（tile 越小越接近转折点）。
+2. **延迟上可行，但要保留 1 步预取。**方案 A 中一组 wave 一个 K 步有 2048 cycle 的 MFMA，足以盖住另一组约 1088 cycle 的 LDS 读写；global 的延迟和传输仍要靠提前一轮发出的 GR 覆盖。功耗墙让外存延迟折合的 cycle 数变少，但 LDS 和 L2 的 cycle 成本不变。
+3. **可以简化，但复杂度是转移而不是消失。**4 象限滚动、region 内配比和 `ds_write` 瓶颈都交给硬件的 wave 切换处理；新增的是两组 wave 的错相编排。最简单的“v1 + occupancy 2”（方案 B）预计藏不住延迟。
+4. **收益有上限。**若测试时主频约 1.2 GHz，v2 已达峰值的 87%，TLP 最多再快约 15%（参考实现 inter_wave 约 99.7% MFMA 效率，§5）。功耗墙下主频由功耗决定：MFMA 利用率越高、每 FLOP 搬运的数据越多，主频越低。方案 A 每 FLOP 的 LDS 读写比 v2 多 33%，实际收益会小于 15%。
+5. **需要实测：**负载下的主频；global 延迟以及 L2、MALL、HBM 的命中比例；两组 wave 是否真的错相。
