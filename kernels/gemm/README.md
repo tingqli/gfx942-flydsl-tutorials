@@ -113,7 +113,25 @@ for k, acc in range(fx.Index(0), fx.Index(K//32), fx.Index(1), init=acc_init):  
 
 [单独查看 v0/v1 cache-line 利用对比（SVG）](slides/figs/mfma_coalescing.svg)
 
-**问题：按 MFMA 排布直接从外存读，访存合并效率只有一半。**MFMA 规定了每个 lane 拿哪些元素：lane `l` 提供 A 的第 `l%16` 行。所以直接按这个排布从显存读时，一条 load 的 64 个 lane 必然分散在 16 行，每行只有 `{Lr, Lr+16, Lr+32, Lr+48}` 这 4 个 lane，合起来读 64 B，只占一条 128 B cache line 的一半，另一半要靠下一条指令再读。数据可能命中 L1/L2，HBM 流量不一定翻倍，但每条指令要处理的 cache line 是读满时的两倍（16 条 vs 8 条），地址处理和 L1 的开销也跟着翻倍。图中比较的是**单次指令的逻辑 cache-line 利用率**，跨 K 步的缓存复用和实际 HBM 流量不能直接据此推算。
+**问题：按 MFMA 排布直接从外存读，访存合并效率低。**MFMA 规定了每个 lane 拿哪些元素：lane `l` 提供 A 的第 `l%16` 行。所以直接按这个排布从显存读时，一条 load 的 64 个 lane 必然分散在 16 行，每行只有 `{Lr, Lr+16, Lr+32, Lr+48}` 这 4 个 lane，合起来读 64 B，只占一条 128 B cache line 的一半，另一半要靠下一条指令再读。数据可能命中 L1/L2，HBM 流量不一定翻倍，但每条指令涉及的 cache line 是读满时的两倍（16 条 vs 8 条）；按硬件实际的合并单位（quad，见下）计算，访问次数更是 4 倍（64 次 vs 16 次）。图中比较的是**单次指令的逻辑 cache-line 利用率**，跨 K 步的缓存复用和实际 HBM 流量不能直接据此推算。
+
+**合并的单位是 quad，不要求 lane 号与地址同向递增**：CDNA3 把一条访存指令的 64 个 lane 按 quad（相邻 4 个 lane：lane 4i～4i+3）交给地址处理单元，每个 quad 内落在同一条 cache line 的地址合成 1 次访问，quad 之间不再合并。依据是 rocprof-compute 的 vL1D Coalescing 指标：`TA_TOTAL_WAVEFRONTS × 64 × 100 / (TCP_TOTAL_ACCESSES × 4)`，取值 25%～100%，即每条指令理想 16 次访问（每 quad 1 次），最差 64 次（每 lane 1 次）。因此：
+
+| lane 与地址的对应关系 | 影响 |
+|---|---|
+| quad 内部任意置换（倒序、乱序），4 个地址仍在同一条 line 内 | 无影响，仍是 1 次访问 |
+| quad 之间整体互换（例如 quad 0 读第 5 条 line，quad 1 读第 0 条） | 无影响，访问次数不变 |
+| 一个 quad 的 4 个 lane 落到不同的 line，即使整条指令合起来仍是一段连续的 1 KiB | 这个 quad 要拆成多次访问，最坏每 lane 1 次 |
+
+对 16 B 的 load，最稳妥的条件是**每个 quad 的 4 个 lane 合起来覆盖一段对齐的 64 B**，顺序不限。这样无论 L1 cache line 是 64 B（rocprof-compute 文档的说法）还是 128 B（本文的讨论口径），结论都成立。多拆出来的访问大多会命中 L1，HBM 流量通常不变；增加的是地址处理（TA）和 L1 tag 查找的次数，访存指令的吞吐随之下降。
+
+本例中：
+
+- v0 按 MFMA 排布直接读：一个 quad 的 4 个 lane 落在 4 行，每个 quad 要 4 次访问，整条指令 64 次，合并率 25%。
+- v1 搬运时 `lane = 8·row + chunk`（§2.2）：每个 quad 读同一行的 4 个相邻 chunk，每个 quad 1 次访问。
+- 在 global 地址一侧对 chunk 做 XOR 置换（CDNA4 用 global→LDS 直通时只能这样做 swizzle，§3.0）：`chunk ^ x` 把一组对齐的 4 个 chunk 映射成另一组对齐的 4 个 chunk，quad 仍在同一段 64 B 内，不影响合并。
+
+这个模型是从指标定义推出来的；自己的访问模式可以用 `rocprofv3 --pmc TA_TOTAL_WAVEFRONTS_sum TCP_TOTAL_ACCESSES_sum` 实测合并率。
 
 **通用的解决办法**是在“合并读取需要的连续排布”和“MFMA 需要的 lane 排布”之间做一次重排，区别在于重排发生在哪里：
 
@@ -126,7 +144,10 @@ for k, acc in range(fx.Index(0), fx.Index(K//32), fx.Index(1), init=acc_init):  
 
 v1 选择经 LDS 重排：它本来就要用 LDS 让 4 个 wave 共享 A、B，顺便把合并问题一起解决了。
 
-> **NVIDIA 对照**：相当于 `mma.sync.m16n8k16` 的 fragment 排布，只是一条指令覆盖 16×16×16、由 64 个 lane 一起提供操作数。NVIDIA 上常用 `ldmatrix` 把 smem 装成 fragment；CDNA3 没有 `ldmatrix`，直接按上面的排布用 16 B 的 load 读。
+> **NVIDIA 对照**
+>
+> - 相当于 `mma.sync.m16n8k16` 的 fragment 排布，只是一条指令覆盖 16×16×16、由 64 个 lane 一起提供操作数。NVIDIA 上常用 `ldmatrix` 把 smem 装成 fragment；CDNA3 没有 `ldmatrix`，直接按上面的排布用 16 B 的 load 读。
+> - 访存合并：NVIDIA 按整个 warp 统计用到的 32 B sector 数，warp 内任意置换都不影响合并；CDNA3 的合并单位只有 4 个 lane，跨 quad 打乱地址是有代价的。
 
 ### 1.3 优化原理：寄存器复用
 
