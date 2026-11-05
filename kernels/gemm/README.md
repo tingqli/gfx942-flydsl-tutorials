@@ -113,9 +113,18 @@ for k, acc in range(fx.Index(0), fx.Index(K//32), fx.Index(1), init=acc_init):  
 
 [单独查看 v0/v1 cache-line 利用对比（SVG）](slides/figs/mfma_coalescing.svg)
 
-v0 中 `{Lr, Lr+16, Lr+32, Lr+48}` 读同一行连续 64 B：一条 wave 的 64 个 lane 分散在 16 行，每行只用一条 128 B line 的一半；v1 的搬运排布（§2.2，`st_c = tid % 8`）让每行 8 个相邻 lane 读满 128 B，一条 wave 只涉及 8 行。这是**单次指令的逻辑 cache-line 利用率**，跨 K 步缓存复用和实际 HBM 流量不能直接据此推算。
+**问题：按 MFMA 排布直接从外存读，访存合并效率只有一半。**MFMA 规定了每个 lane 拿哪些元素：lane `l` 提供 A 的第 `l%16` 行。所以直接按这个排布从显存读时，一条 load 的 64 个 lane 必然分散在 16 行，每行只有 `{Lr, Lr+16, Lr+32, Lr+48}` 这 4 个 lane，合起来读 64 B，只占一条 128 B cache line 的一半，另一半要靠下一条指令再读。数据可能命中 L1/L2，HBM 流量不一定翻倍，但每条指令要处理的 cache line 是读满时的两倍（16 条 vs 8 条），地址处理和 L1 的开销也跟着翻倍。图中比较的是**单次指令的逻辑 cache-line 利用率**，跨 K 步的缓存复用和实际 HBM 流量不能直接据此推算。
 
-因此 v0 直接按 MFMA 排布从显存读时，每条 line 在本次指令中只利用一半；v1 先按连续地址读到寄存器、写进 LDS，再按 MFMA 排布从 LDS 读出来。
+**通用的解决办法**是在“合并读取需要的连续排布”和“MFMA 需要的 lane 排布”之间做一次重排，区别在于重排发生在哪里：
+
+| 办法 | 做法 | 代价与适用场景 |
+|---|---|---|
+| 预重排（preshuffle） | 事先在显存里把数据按 MFMA 的 lane 顺序排好，一个 wave 的 64 个 lane 正好读连续的 1 KiB | 运行时没有额外开销；只适合提前已知的数据（如推理权重），或让上游 kernel 直接按这个布局写出。布局与 MFMA 形状和 tile 绑定；数据直接进寄存器时，wave 之间也不再共享 |
+| 经 LDS 重排（v1 的做法） | 按连续地址合并读进寄存器（每行 8 个相邻 lane 读满 128 B，§2.2），`ds_write` 写入 LDS，再按 MFMA 排布 `ds_read` 读出 | 适用于任意输入，还能让多个 wave 共享同一份数据；代价是 LDS 容量、`ds_write`/`ds_read` 带宽、barrier 和暂存寄存器（§3.6、§3.8）。CDNA4 可用 16 B 的 global→LDS 直通省掉暂存寄存器（§3.0） |
+| 寄存器内跨 lane 交换 | 合并读入后，用 DPP、`ds_bpermute` 等在 lane 之间搬运数据 | 不占 LDS 容量；但每条指令只搬 4 B，16 B 要 4 条，开销大，只适合少量数据 |
+| 调整 K 的排列 | `Σk` 与顺序无关，A、B 用同样的 K 排列，让每个 lane 读连续的 16 B | 没有额外开销，v0 已经在用；但每行最多 4 个 lane，只能做到半条 line，不能单独解决问题 |
+
+v1 选择经 LDS 重排：它本来就要用 LDS 让 4 个 wave 共享 A、B，顺便把合并问题一起解决了。
 
 > **NVIDIA 对照**：相当于 `mma.sync.m16n8k16` 的 fragment 排布，只是一条指令覆盖 16×16×16、由 64 个 lane 一起提供操作数。NVIDIA 上常用 `ldmatrix` 把 smem 装成 fragment；CDNA3 没有 `ldmatrix`，直接按上面的排布用 16 B 的 load 读。
 
@@ -158,7 +167,25 @@ rocprofv3 --stats --kernel-trace -f csv -- python3 v0.py                        
 
 ## 2. v1：引入 LDS
 
-CDNA3 的 4 个 SIMD 共享一个 LDS，所以 4 wave/CTA 可以通过 LDS + barrier 协作加载 A、B，再各自从 LDS 读取复用。目的和 v0 加大 wave tile 一样，是提高数据复用；LDS 的作用是把复用从 wave 级扩大到 CTA 级，进一步降低外存访问。
+CDNA3 的 4 个 SIMD 共享一个 LDS，所以 4 wave/CTA 可以通过 LDS + barrier 协作加载 A、B，再各自从 LDS 读取复用。
+
+**引入 LDS 的好处**（与 v0 每个 wave 直接从外存读相比）：
+
+| 好处 | v0：每个 wave 直接从外存读 | v1：4 个 wave 经 LDS 协作 |
+|---|---|---|
+| **去掉 wave 间的重复读取** | 4 个 wave 若合起来算一个 256×256 区域，A、B 的每一行都要被两个 wave 各读一次 | 每一行只由一个 wave 读一次：CTA 每 K 步从 L2 读 64 KiB，而不是 128 KiB；L2 层强度从 64 升到 128 FLOP/B |
+| **外存访问合并更好** | 只能按 MFMA 排布读，每行只有 4 个 lane，一条 load 涉及 16 条 cache line、每条只用一半 | 搬运时按连续地址读，8 个相邻 lane 读满一行，一条 load 正好是 8 条完整的 cache line（§1.2） |
+| **global load 条数减半** | 每个 wave 每 K 步 32 条 `global_load_dwordx4` | 每个 wave 只需 16 条；操作数改由 32 条 `ds_read_b128` 提供，延迟从数百～上千 cycle 降到约百 cycle |
+| **复用不再受单个 wave 的寄存器限制** | 想提高强度只能加大 wave tile，128×256 时累加器就放不下了（§1.3） | 每个 wave 的累加器仍是 128×128（256 个），CTA tile 扩大到 256×256，强度翻倍 |
+| **多了一级缓冲** | 数据只能放在寄存器里 | LDS 成为外存和寄存器之间的一级缓冲，v2 的软件流水就建立在它上面（§3） |
+
+代价是每个 K 步需要两个 barrier，LDS 只有 64 KB（§3.2），`ds_write` / `ds_read` 要占用 LDS 端口，搬运还要经过暂存寄存器（§3.6、§3.8）。实测 L2 之外的读取从 5.59 GB 降到 1.24 GB，性能从 338 TFLOPS 提升到 440 TFLOPS（§2.4）。
+
+下图以 A 为例：4 个 wave 各加载并写入 1/4 的行（每 32 行中各负责 8 行），但计算时每个 wave 要读其中一半（128 行），其中 3/4 是别的 wave 写的。所以写 LDS 之前要用 barrier 确认所有 wave 都读完了上一块，写完之后再用 barrier 确认这一块对所有 wave 都可见。
+
+![4 个 wave 分工把 A tile 从 global 搬进 LDS：各自加载 1/4 的行，经两个 barrier 后，各自按 MFMA 排布读回 128 行](slides/figs/v1_lds_cooperation.svg)
+
+[单独查看 4 个 wave 协作加载与 barrier 同步（SVG）](slides/figs/v1_lds_cooperation.svg)
 
 ### 2.0 硬件：LDS、barrier 与缓存层次
 

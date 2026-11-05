@@ -1,0 +1,268 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1280 880" role="img" aria-labelledby="title desc">
+  <title id="title">v1：4 个 wave 分工把 A tile 搬进 LDS，用两个 barrier 同步</title>
+  <desc id="desc">上半部分是数据流：CTA 的 256 个线程每次 load 读 A tile 的 32 行，wave w 负责每 32 行中的第 8w 到 8w+7 行，8 次 load 读完 256 行，先放进各自的暂存 VGPR；barrier ① 之后写进 LDS 的同一行；barrier ② 之后，每个 wave 按 MFMA 排布读回自己要用的 128 行：wave 0、2 读上半，wave 1、3 读下半，其中只有四分之一是自己写的。下半部分是时间线：4 个 wave 发出 load、等数据，先到的在 barrier 前空等，最慢的到达后一起写 LDS，再经过第二个 barrier 后读 LDS 并做 MFMA。</desc>
+  <style>
+    text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #edf2fb; }
+    .bg { fill: #132239; }
+    .card { fill: #182b44; stroke: #3d5675; stroke-width: 1.5; }
+    .title { font-size: 24px; font-weight: 700; }
+    .heading { font-size: 16px; font-weight: 700; }
+    .small { font-size: 14px; }
+    .muted { fill: #aabbcf; }
+    .label { font-size: 12.5px; fill: #aabbcf; }
+    .tiny { font-size: 11px; fill: #aabbcf; }
+    .rowlabel { font-size: 11px; fill: #8fa3bb; text-anchor: end; }
+    .frame-hbm { fill: none; stroke: #87bbff; stroke-width: 2.5; }
+    .frame-lds { fill: none; stroke: #ffce75; stroke-width: 2.5; }
+    .box { fill: #152840; stroke-width: 2; }
+    .boxtitle { font-size: 14px; font-weight: 700; }
+    .chip-text { font-size: 10.5px; font-weight: 700; fill: #0c1628; text-anchor: middle; }
+    .barrier { stroke: #ff6b8a; stroke-width: 2.5; stroke-dasharray: 8 6; }
+    .pill { fill: #3a1f2b; stroke: #ff6b8a; stroke-width: 1.5; }
+    .pilltext { font-size: 12px; font-weight: 700; fill: #ffb3c4; text-anchor: middle; }
+    .why { font-size: 12px; fill: #ff9ab0; text-anchor: middle; }
+    .mask { fill: #182b44; }
+    .flow { stroke: #cfe0f5; stroke-width: 3; marker-end: url(#arrow); }
+    .flowtext { font-size: 14px; font-weight: 700; text-anchor: middle; }
+    .flowsub { font-size: 12px; fill: #aabbcf; text-anchor: middle; }
+    .own { stroke: #ffffff; stroke-width: 1.6; }
+    .brace { stroke: #9fb3ca; stroke-width: 1.3; fill: none; }
+    .seg-gr { fill: #3272ae; stroke: #8bc7ff; stroke-width: 1.2; }
+    .seg-wait { fill: #62502e; fill-opacity: .56; stroke: #e6bb70; stroke-width: 1.2; stroke-dasharray: 5 3; }
+    .seg-lw { fill: #8a6a1f; stroke: #ffce75; stroke-width: 1.2; }
+    .seg-mfma { fill: #7553a7; stroke: #dfb5ff; stroke-width: 1.2; }
+    .seg-idle { fill: url(#idle); stroke: #ff6b8a; stroke-width: 1; stroke-opacity: .6; }
+    .segtext { font-size: 12px; font-weight: 700; text-anchor: middle; }
+    .lane { font-size: 13px; font-weight: 700; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#cfe0f5"/></marker>
+    <!-- 32 bands of 8 rows (12 px each); the band of row group g is loaded and written by wave g % 4. -->
+    <pattern id="bands" x="0" y="172" width="160" height="48" patternUnits="userSpaceOnUse">
+      <rect y="0" width="160" height="12" fill="#4f8fd8"/>
+      <rect y="12" width="160" height="12" fill="#3fb27f"/>
+      <rect y="24" width="160" height="12" fill="#e0a33a"/>
+      <rect y="36" width="160" height="12" fill="#b46ad6"/>
+      <line x1="0" y1="0" x2="160" y2="0" stroke="#0c1628" stroke-width="3"/>
+    </pattern>
+    <!-- 8 chunks of 16 B per 128 B row. -->
+    <pattern id="chunks" x="70" y="0" width="20" height="8" patternUnits="userSpaceOnUse">
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#0c1628" stroke-opacity=".35" stroke-width="1"/>
+    </pattern>
+    <!-- 16 bands (128 rows) laid out horizontally for the operand boxes. -->
+    <pattern id="strip" x="872" y="0" width="52" height="10" patternUnits="userSpaceOnUse">
+      <rect x="0" width="13" height="10" fill="#4f8fd8"/>
+      <rect x="13" width="13" height="10" fill="#3fb27f"/>
+      <rect x="26" width="13" height="10" fill="#e0a33a"/>
+      <rect x="39" width="13" height="10" fill="#b46ad6"/>
+      <line x1="0" y1="0" x2="0" y2="10" stroke="#0c1628" stroke-width="2.5"/>
+    </pattern>
+    <pattern id="idle" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <line x1="0" y1="0" x2="0" y2="7" stroke="#ff6b8a" stroke-width="2.2" stroke-opacity=".75"/>
+    </pattern>
+    <!-- Eight staged row groups of one wave, one per pass p. Color comes from the <use> element. -->
+    <g id="chips">
+      <rect x="0" y="0" width="32" height="16" rx="3" fill="currentColor"/><text class="chip-text" x="16" y="12">p0</text>
+      <rect x="36" y="0" width="32" height="16" rx="3" fill="currentColor"/><text class="chip-text" x="52" y="12">p1</text>
+      <rect x="72" y="0" width="32" height="16" rx="3" fill="currentColor"/><text class="chip-text" x="88" y="12">p2</text>
+      <rect x="108" y="0" width="32" height="16" rx="3" fill="currentColor"/><text class="chip-text" x="124" y="12">p3</text>
+      <rect x="0" y="20" width="32" height="16" rx="3" fill="currentColor"/><text class="chip-text" x="16" y="32">p4</text>
+      <rect x="36" y="20" width="32" height="16" rx="3" fill="currentColor"/><text class="chip-text" x="52" y="32">p5</text>
+      <rect x="72" y="20" width="32" height="16" rx="3" fill="currentColor"/><text class="chip-text" x="88" y="32">p6</text>
+      <rect x="108" y="20" width="32" height="16" rx="3" fill="currentColor"/><text class="chip-text" x="124" y="32">p7</text>
+    </g>
+  </defs>
+
+  <rect class="bg" width="1280" height="880" rx="18"/>
+  <text class="title" x="30" y="40">v1：4 个 wave 分工把 A tile 搬进 LDS，用两个 barrier 同步</text>
+  <text class="small muted" x="30" y="64">以 A 为例（B 同理）。256 个线程每次 load 读 32 行，wave w 负责每 32 行中的第 8w～8w+7 行；颜色表示这一行由哪个 wave 加载和写入。</text>
+  <g transform="translate(30 82)">
+    <rect x="0" y="0" width="24" height="16" rx="3" fill="#4f8fd8"/><text class="label" x="32" y="13">wave 0（SIMD 0）</text>
+    <rect x="170" y="0" width="24" height="16" rx="3" fill="#3fb27f"/><text class="label" x="202" y="13">wave 1（SIMD 1）</text>
+    <rect x="340" y="0" width="24" height="16" rx="3" fill="#e0a33a"/><text class="label" x="372" y="13">wave 2（SIMD 2）</text>
+    <rect x="510" y="0" width="24" height="16" rx="3" fill="#b46ad6"/><text class="label" x="542" y="13">wave 3（SIMD 3）</text>
+    <line class="barrier" x1="690" y1="8" x2="730" y2="8"/><text class="label" x="740" y="13">barrier（全 CTA 同步）</text>
+    <rect x="910" y="0" width="24" height="16" fill="#4f8fd8" stroke="#ffffff" stroke-width="1.6"/><text class="label" x="942" y="13">白框：该 wave 自己写入的行</text>
+  </g>
+
+  <!-- Data flow. -->
+  <rect class="card" x="30" y="112" width="1220" height="478" rx="14"/>
+  <text class="heading" x="60" y="140">global 中的 A tile</text>
+  <text class="label" x="60" y="158">256 行 × 128 B（本 K 步）</text>
+  <text class="heading" x="320" y="140">暂存 VGPR</text>
+  <text class="label" x="320" y="158">每 wave 8 次 load，共 32 个 VGPR</text>
+  <text class="heading" x="570" y="140">LDS 中的 A tile</text>
+  <text class="label" x="570" y="158">32 KiB，4 个 wave 共享</text>
+  <text class="heading" x="860" y="140">MFMA 操作数 VGPR</text>
+  <text class="label" x="860" y="158">按 MFMA 排布各读 128 行（wm = wave % 2）</text>
+
+  <!-- Global tile. -->
+  <rect x="70" y="172" width="160" height="384" fill="url(#bands)"/>
+  <rect x="70" y="172" width="160" height="384" fill="url(#chunks)"/>
+  <rect class="frame-hbm" x="70" y="172" width="160" height="384"/>
+  <text class="rowlabel" x="64" y="180">0</text>
+  <text class="rowlabel" x="64" y="228">32</text>
+  <text class="rowlabel" x="64" y="276">64</text>
+  <text class="rowlabel" x="64" y="324">96</text>
+  <text class="rowlabel" x="64" y="372">128</text>
+  <text class="rowlabel" x="64" y="420">160</text>
+  <text class="rowlabel" x="64" y="468">192</text>
+  <text class="rowlabel" x="64" y="516">224</text>
+
+  <!-- Staging registers of the four waves. -->
+  <rect class="box" x="320" y="172" width="160" height="84" rx="8" stroke="#4f8fd8"/>
+  <text class="boxtitle" x="332" y="192" fill="#4f8fd8">wave 0</text><text class="tiny" x="468" y="192" text-anchor="end">SIMD 0</text>
+  <use xlink:href="#chips" x="332" y="200" style="color:#4f8fd8"/>
+  <text class="label" x="332" y="250">每 32 行中的第 0–7 行</text>
+
+  <rect class="box" x="320" y="272" width="160" height="84" rx="8" stroke="#3fb27f"/>
+  <text class="boxtitle" x="332" y="292" fill="#3fb27f">wave 1</text><text class="tiny" x="468" y="292" text-anchor="end">SIMD 1</text>
+  <use xlink:href="#chips" x="332" y="300" style="color:#3fb27f"/>
+  <text class="label" x="332" y="350">每 32 行中的第 8–15 行</text>
+
+  <rect class="box" x="320" y="372" width="160" height="84" rx="8" stroke="#e0a33a"/>
+  <text class="boxtitle" x="332" y="392" fill="#e0a33a">wave 2</text><text class="tiny" x="468" y="392" text-anchor="end">SIMD 2</text>
+  <use xlink:href="#chips" x="332" y="400" style="color:#e0a33a"/>
+  <text class="label" x="332" y="450">每 32 行中的第 16–23 行</text>
+
+  <rect class="box" x="320" y="472" width="160" height="84" rx="8" stroke="#b46ad6"/>
+  <text class="boxtitle" x="332" y="492" fill="#b46ad6">wave 3</text><text class="tiny" x="468" y="492" text-anchor="end">SIMD 3</text>
+  <use xlink:href="#chips" x="332" y="500" style="color:#b46ad6"/>
+  <text class="label" x="332" y="550">每 32 行中的第 24–31 行</text>
+
+  <!-- LDS tile: each wave writes the same rows it loaded. -->
+  <rect x="570" y="172" width="160" height="384" fill="url(#bands)"/>
+  <rect x="570" y="172" width="160" height="384" fill="url(#chunks)"/>
+  <rect class="frame-lds" x="570" y="172" width="160" height="384"/>
+  <path class="brace" d="M736 174 H742 V362 H736"/>
+  <path class="brace" d="M736 366 H742 V554 H736"/>
+  <text class="label" x="748" y="272">上半</text><text class="tiny" x="748" y="288">0–127</text>
+  <text class="label" x="748" y="464">下半</text><text class="tiny" x="748" y="480">128–255</text>
+
+  <!-- Operands: each wave reads 128 rows, only 1/4 of them written by itself. -->
+  <rect class="box" x="860" y="172" width="240" height="84" rx="8" stroke="#4f8fd8"/>
+  <text class="boxtitle" x="872" y="192"><tspan fill="#4f8fd8">wave 0</tspan> 读第 0–127 行</text>
+  <rect x="872" y="200" width="208" height="18" fill="url(#strip)"/>
+  <rect x="872" y="200" width="208" height="18" fill="#152840" opacity=".55"/>
+  <rect class="own" x="872" y="200" width="13" height="18" fill="#4f8fd8"/>
+  <rect class="own" x="924" y="200" width="13" height="18" fill="#4f8fd8"/>
+  <rect class="own" x="976" y="200" width="13" height="18" fill="#4f8fd8"/>
+  <rect class="own" x="1028" y="200" width="13" height="18" fill="#4f8fd8"/>
+  <text class="tiny" x="898" y="232" text-anchor="middle">p0</text><text class="tiny" x="950" y="232" text-anchor="middle">p1</text><text class="tiny" x="1002" y="232" text-anchor="middle">p2</text><text class="tiny" x="1054" y="232" text-anchor="middle">p3</text>
+  <text class="label" x="872" y="250">白框是自己写的，只占 1/4</text>
+
+  <rect class="box" x="860" y="272" width="240" height="84" rx="8" stroke="#3fb27f"/>
+  <text class="boxtitle" x="872" y="292"><tspan fill="#3fb27f">wave 1</tspan> 读第 128–255 行</text>
+  <rect x="872" y="300" width="208" height="18" fill="url(#strip)"/>
+  <rect x="872" y="300" width="208" height="18" fill="#152840" opacity=".55"/>
+  <rect class="own" x="885" y="300" width="13" height="18" fill="#3fb27f"/>
+  <rect class="own" x="937" y="300" width="13" height="18" fill="#3fb27f"/>
+  <rect class="own" x="989" y="300" width="13" height="18" fill="#3fb27f"/>
+  <rect class="own" x="1041" y="300" width="13" height="18" fill="#3fb27f"/>
+  <text class="tiny" x="898" y="332" text-anchor="middle">p4</text><text class="tiny" x="950" y="332" text-anchor="middle">p5</text><text class="tiny" x="1002" y="332" text-anchor="middle">p6</text><text class="tiny" x="1054" y="332" text-anchor="middle">p7</text>
+  <text class="label" x="872" y="350">白框是自己写的，只占 1/4</text>
+
+  <rect class="box" x="860" y="372" width="240" height="84" rx="8" stroke="#e0a33a"/>
+  <text class="boxtitle" x="872" y="392"><tspan fill="#e0a33a">wave 2</tspan> 读第 0–127 行</text>
+  <rect x="872" y="400" width="208" height="18" fill="url(#strip)"/>
+  <rect x="872" y="400" width="208" height="18" fill="#152840" opacity=".55"/>
+  <rect class="own" x="898" y="400" width="13" height="18" fill="#e0a33a"/>
+  <rect class="own" x="950" y="400" width="13" height="18" fill="#e0a33a"/>
+  <rect class="own" x="1002" y="400" width="13" height="18" fill="#e0a33a"/>
+  <rect class="own" x="1054" y="400" width="13" height="18" fill="#e0a33a"/>
+  <text class="tiny" x="898" y="432" text-anchor="middle">p0</text><text class="tiny" x="950" y="432" text-anchor="middle">p1</text><text class="tiny" x="1002" y="432" text-anchor="middle">p2</text><text class="tiny" x="1054" y="432" text-anchor="middle">p3</text>
+  <text class="label" x="872" y="450">白框是自己写的，只占 1/4</text>
+
+  <rect class="box" x="860" y="472" width="240" height="84" rx="8" stroke="#b46ad6"/>
+  <text class="boxtitle" x="872" y="492"><tspan fill="#b46ad6">wave 3</tspan> 读第 128–255 行</text>
+  <rect x="872" y="500" width="208" height="18" fill="url(#strip)"/>
+  <rect x="872" y="500" width="208" height="18" fill="#152840" opacity=".55"/>
+  <rect class="own" x="911" y="500" width="13" height="18" fill="#b46ad6"/>
+  <rect class="own" x="963" y="500" width="13" height="18" fill="#b46ad6"/>
+  <rect class="own" x="1015" y="500" width="13" height="18" fill="#b46ad6"/>
+  <rect class="own" x="1067" y="500" width="13" height="18" fill="#b46ad6"/>
+  <text class="tiny" x="898" y="532" text-anchor="middle">p4</text><text class="tiny" x="950" y="532" text-anchor="middle">p5</text><text class="tiny" x="1002" y="532" text-anchor="middle">p6</text><text class="tiny" x="1054" y="532" text-anchor="middle">p7</text>
+  <text class="label" x="872" y="550">白框是自己写的，只占 1/4</text>
+
+  <!-- Barriers between the phases. -->
+  <line class="barrier" x1="525" y1="168" x2="525" y2="560"/>
+  <line class="barrier" x1="795" y1="168" x2="795" y2="560"/>
+  <rect class="pill" x="488" y="178" width="74" height="20" rx="10"/><text class="pilltext" x="525" y="192">barrier ①</text>
+  <rect class="mask" x="492" y="202" width="66" height="34"/>
+  <text class="why" x="525" y="216">旧块已读完</text><text class="why" x="525" y="232">才能覆盖</text>
+  <rect class="pill" x="758" y="178" width="74" height="20" rx="10"/><text class="pilltext" x="795" y="192">barrier ②</text>
+  <rect class="mask" x="762" y="202" width="66" height="34"/>
+  <text class="why" x="795" y="216">新块已写完</text><text class="why" x="795" y="232">才能读</text>
+
+  <!-- Phase arrows. -->
+  <line class="flow" x1="236" y1="364" x2="312" y2="364"/>
+  <text class="flowtext" x="274" y="352">① GR</text><text class="flowsub" x="274" y="385">global_load</text>
+  <line class="flow" x1="486" y1="364" x2="562" y2="364"/>
+  <rect class="mask" x="499" y="338" width="52" height="18"/><text class="flowtext" x="525" y="352">② LW</text>
+  <rect class="mask" x="497" y="373" width="56" height="16"/><text class="flowsub" x="525" y="385">ds_write</text>
+  <line class="flow" x1="752" y1="364" x2="852" y2="364"/>
+  <rect class="mask" x="769" y="338" width="52" height="18"/><text class="flowtext" x="795" y="352">③ LR</text>
+  <rect class="mask" x="768" y="373" width="54" height="16"/><text class="flowsub" x="795" y="385">ds_read</text>
+
+  <text class="label" x="60" y="578">8 个相邻 lane 读满一行（§2.2）</text>
+  <text class="label" x="320" y="578">行号 = 32p + 8w + 0…7</text>
+  <text class="label" x="570" y="578">写入时 chunk 做 XOR swizzle</text>
+  <text class="label" x="860" y="578">wave 0、2 用上半，wave 1、3 用下半</text>
+
+  <!-- Timeline. -->
+  <rect class="card" x="30" y="604" width="1220" height="232" rx="14"/>
+  <text class="heading" x="56" y="634">时间线：一个 K 步里 4 个 wave 怎样经过两个 barrier（示意，不按比例）</text>
+  <rect class="seg-gr" x="680" y="622" width="20" height="12"/><text class="label" x="706" y="633">GR 发出</text>
+  <rect class="seg-wait" x="774" y="622" width="20" height="12"/><text class="label" x="800" y="633">等 global 数据</text>
+  <rect class="seg-lw" x="908" y="622" width="20" height="12"/><text class="label" x="934" y="633">LW 写 LDS</text>
+  <rect class="seg-mfma" x="1022" y="622" width="20" height="12"/><text class="label" x="1048" y="633">LR + MFMA</text>
+  <rect class="seg-idle" x="1136" y="622" width="20" height="12"/><text class="label" x="1162" y="633">空等</text>
+
+  <text class="pilltext" x="400" y="656">barrier ①</text>
+  <text class="pilltext" x="490" y="656">barrier ②</text>
+
+  <text class="lane" x="56" y="681" fill="#4f8fd8">wave 0</text>
+  <rect class="seg-gr" x="160" y="664" width="36" height="24"/>
+  <rect class="seg-wait" x="196" y="664" width="134" height="24"/>
+  <rect class="seg-idle" x="330" y="664" width="70" height="24"/>
+  <rect class="seg-lw" x="404" y="664" width="66" height="24"/>
+  <rect class="seg-idle" x="470" y="664" width="20" height="24"/>
+  <rect class="seg-mfma" x="494" y="664" width="626" height="24"/><text class="segtext" x="807" y="681">LR + MFMA</text>
+  <rect class="seg-gr" x="1124" y="664" width="36" height="24" opacity=".45"/>
+
+  <text class="lane" x="56" y="715" fill="#3fb27f">wave 1</text>
+  <rect class="seg-gr" x="160" y="698" width="36" height="24"/>
+  <rect class="seg-wait" x="196" y="698" width="104" height="24"/>
+  <rect class="seg-idle" x="300" y="698" width="100" height="24"/>
+  <rect class="seg-lw" x="404" y="698" width="78" height="24"/>
+  <rect class="seg-idle" x="482" y="698" width="8" height="24"/>
+  <rect class="seg-mfma" x="494" y="698" width="626" height="24"/><text class="segtext" x="807" y="715">LR + MFMA</text>
+  <rect class="seg-gr" x="1124" y="698" width="36" height="24" opacity=".45"/>
+
+  <text class="lane" x="56" y="749" fill="#e0a33a">wave 2</text>
+  <rect class="seg-gr" x="160" y="732" width="36" height="24"/>
+  <rect class="seg-wait" x="196" y="732" width="156" height="24"/>
+  <rect class="seg-idle" x="352" y="732" width="48" height="24"/>
+  <rect class="seg-lw" x="404" y="732" width="58" height="24"/>
+  <rect class="seg-idle" x="462" y="732" width="28" height="24"/>
+  <rect class="seg-mfma" x="494" y="732" width="626" height="24"/><text class="segtext" x="807" y="749">LR + MFMA</text>
+  <rect class="seg-gr" x="1124" y="732" width="36" height="24" opacity=".45"/>
+
+  <text class="lane" x="56" y="783" fill="#b46ad6">wave 3</text>
+  <rect class="seg-gr" x="160" y="766" width="36" height="24"/>
+  <rect class="seg-wait" x="196" y="766" width="200" height="24"/>
+  <rect class="seg-lw" x="404" y="766" width="72" height="24"/>
+  <rect class="seg-idle" x="476" y="766" width="14" height="24"/>
+  <rect class="seg-mfma" x="494" y="766" width="626" height="24"/><text class="segtext" x="807" y="783">LR + MFMA</text>
+  <rect class="seg-gr" x="1124" y="766" width="36" height="24" opacity=".45"/>
+
+  <line class="barrier" x1="400" y1="660" x2="400" y2="796"/>
+  <line class="barrier" x1="490" y1="660" x2="490" y2="796"/>
+
+  <path class="brace" d="M160 798 V806 H490 V798"/>
+  <text class="label" x="325" y="824" text-anchor="middle">这段 MFMA 空闲（v1 还没有软件流水，§2.4）</text>
+  <text class="label" x="520" y="824">斜线：先到的 wave 在 barrier 前空等；最慢的 wave 到达后，4 个 wave 才一起放行</text>
+  <text class="label" x="1220" y="824" text-anchor="end">时间 →</text>
+
+  <text class="label" x="30" y="864">只画了 A；B 同理，但按 wn = wave // 2 分左右半。行号是 CTA tile 内的行号，p 为 pass（每个 pass 32 行，共 8 个）。</text>
+</svg>
