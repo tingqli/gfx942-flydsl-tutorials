@@ -111,10 +111,6 @@ for k, acc in range(fx.Index(0), fx.Index(K//32), fx.Index(1), init=acc_init):  
 
 **16 B load 的排布与访存合并**：把两条 MFMA 的 K 拼起来，一次 `global_load_dwordx4` 覆盖 16 行 × 32 K。A 在显存里按行存放，K 连续，行与行之间相隔 `K × 2 B = 16 KB`：
 
-![v0 与 v1 每 lane 同为 16 B load 时，分别使用 128 B cache line 的一半与全部的示意](slides/figs/mfma_coalescing.svg)
-
-[单独查看 v0/v1 cache-line 利用对比（SVG）](slides/figs/mfma_coalescing.svg)
-
 **问题：按 MFMA 排布直接从外存读，访存合并效率低。**MFMA 规定了每个 lane 拿哪些元素：lane `l` 提供 A 的第 `l%16` 行。所以直接按这个排布从显存读时，一条 load 的 64 个 lane 必然分散在 16 行，每行只有 `{Lr, Lr+16, Lr+32, Lr+48}` 这 4 个 lane，合起来读 64 B，只占一条 128 B cache line 的一半，另一半要靠下一条指令再读。数据可能命中 L1/L2，HBM 流量不一定翻倍，但每条指令涉及的 cache line 是读满时的两倍（16 条 vs 8 条）；按硬件实际的合并单位（quad，见下）计算，访问次数更是 4 倍（64 次 vs 16 次）。图中比较的是**单次指令的逻辑 cache-line 利用率**，跨 K 步的缓存复用和实际 HBM 流量不能直接据此推算。
 
 **合并的单位是 quad，不要求 lane 号与地址同向递增**：CDNA3 把一条访存指令的 64 个 lane 按 quad（相邻 4 个 lane：lane 4i～4i+3）交给地址处理单元，每个 quad 内落在同一条 cache line 的地址合成 1 次访问，quad 之间不再合并。依据是 rocprof-compute 的 vL1D Coalescing 指标：`TA_TOTAL_WAVEFRONTS × 64 × 100 / (TCP_TOTAL_ACCESSES × 4)`，取值 25%～100%，即每条指令理想 16 次访问（每 quad 1 次），最差 64 次（每 lane 1 次）。因此：
