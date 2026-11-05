@@ -11,14 +11,14 @@ v1/v2 的 `M/256 × N/256 = 32 × 38 = 1216 = 4 × 304` 个 CTA，恰为按 MI30
 | 文件 | 内容 | 最终实测 TFLOPS | 相对 `torch.matmul` |
 |---|---|---|---|
 | [v0.py](v0.py) | 1 wave/CTA，直接从显存读到寄存器做 MFMA（最终采用 128×128 wave tile） | 338 | 53.4% |
-| [v0_preshuffle.py](v0_preshuffle.py) | v0 + 寄存器双缓冲（ILP）+ 输入预重排，不用 LDS（§1.4） | | |
+| [v0_preshuffle.py](v0_preshuffle.py) | v0 + 寄存器双缓冲（ILP）+ 输入预重排，不用 LDS（§1.4） | 662 | 103.8% |
 | [v1.py](v1.py) | 4 wave/CTA，A/B 经 LDS 共享，XOR swizzle | 440 | 69.5% |
 | [v2.py](v2.py) | v1 + 单 wave 软件流水（4 region、寄存器预取、`rocdl.sched_*` 调度提示） | 649 | 102.5% |
 | [bench.py](bench.py) | 正确性 + 计时（含 `torch.matmul` 对照） | `torch.matmul`：633 | 100%（基准） |
 | [slides/](slides/) | 培训 PPT：`make_figs.py` 画图，`make_ppt.py` 生成 `CDNA3_GEMM_FlyDSL.pptx`，`measure.sh` 采数据 | — | — |
 | [slides/CDNA3_GEMM_README.pptx](slides/CDNA3_GEMM_README.pptx) | 本文的 21 页精简演示版；可用 [slides/make_readme_ppt.py](slides/make_readme_ppt.py) 重建（依赖见 [slides/requirements-readme-ppt.txt](slides/requirements-readme-ppt.txt)） | — | — |
 
-以上取自同一形状的[实测结果（§4）](#4-结果)，百分比 = 本版本 TFLOPS ÷ `torch.matmul` 的 633 TFLOPS × 100%。**v0/v1/v2 输出 FP32，`torch.matmul` 对照输出 BF16**，因此百分比仅是该次测量的吞吐比，不是同精度 GEMM 的性能排名；设备与频率记录的限制见 §4。
+以上取自同一形状的[实测结果（§4）](#4-结果)，百分比 = 本版本 TFLOPS ÷ `torch.matmul` 的 633 TFLOPS × 100%。`v0_preshuffle.py` 一行例外：取自 §1.4 在 MI300X 上的另一次测量，同次测量中 `torch.matmul` 为 638 TFLOPS、v2 为 641 TFLOPS，百分比按 638 计算；其输入已事先预重排，重排时间不计入。**v0/v1/v2 输出 FP32，`torch.matmul` 对照输出 BF16**，因此百分比仅是该次测量的吞吐比，不是同精度 GEMM 的性能排名；设备与频率记录的限制见 §4。
 
 ```bash
 python3 bench.py                    # 所有版本：正确性 + TFLOPS
