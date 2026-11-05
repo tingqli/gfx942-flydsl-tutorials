@@ -123,6 +123,12 @@ for k, acc in range(fx.Index(0), fx.Index(K//32), fx.Index(1), init=acc_init):  
 | quad 之间整体互换（例如 quad 0 读第 5 条 line，quad 1 读第 0 条） | 无影响，访问次数不变 |
 | 一个 quad 的 4 个 lane 落到不同的 line，即使整条指令合起来仍是一段连续的 1 KiB | 这个 quad 要拆成多次访问，最坏每 lane 1 次 |
 
+下图对比四种 lane→地址映射：它们都读取同一段连续的 1 KiB，但只有最后一种打散了 quad 内的 line 局部性。虚线框表示 quad，颜色表示地址所在的 128 B line；访问次数按本节的指标模型估计。
+
+![顺序读取、quad 内倒序、quad 整体交换和跨 quad 打散的对比：总体地址相同，quad 内局部性决定合并次数](slides/figs/quad_coalescing.svg)
+
+[单独查看 quad 合并与地址置换（SVG）](slides/figs/quad_coalescing.svg)
+
 对 16 B 的 load，最稳妥的条件是**每个 quad 的 4 个 lane 合起来覆盖一段对齐的 64 B**，顺序不限。这样无论 L1 cache line 是 64 B（rocprof-compute 文档的说法）还是 128 B（本文的讨论口径），结论都成立。多拆出来的访问大多会命中 L1，HBM 流量通常不变；增加的是地址处理（TA）和 L1 tag 查找的次数，访存指令的吞吐随之下降。
 
 本例中：

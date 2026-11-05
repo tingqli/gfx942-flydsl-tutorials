@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 1220" role="img" aria-labelledby="title desc">
+  <title id="title">CDNA3 quad 访存合并：地址顺序不是关键，quad 内的 line 局部性才是</title>
+  <desc id="desc">四种 wave64 的 16 字节加载映射都覆盖从对齐基址开始的连续 1024 字节。展示前四个 quad，每个 quad 四个 lane。顺序读取、quad 内倒序和 quad 0 与 quad 2 整体交换，在本节的 quad 合并模型下都是每 quad 一次、每 wave 十六次访问。跨 quad 打散采用 chunk=16*(lane%4)+lane/4 的整数商，每个 quad 的地址分别位于四条不同的 128 字节 line，估计每 wave 六十四次访问。颜色表示地址所在的 128 字节 line，不表示 quad。图中访问次数是依据 profiler 指标推导的模型，不是实际 HBM 事务数。</desc>
+  <style>
+    text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #edf3fa; }
+    .bg { fill: #0c1628; } .panel { fill: #17283e; stroke: #39506b; stroke-width: 1.5; }
+    .title { font-size: 26px; font-weight: 700; } .heading { font-size: 21px; font-weight: 700; }
+    .label { font-size: 16px; font-weight: 600; } .small { font-size: 14px; fill: #b7c9dc; }
+    .cell { font-size: 15px; text-anchor: middle; font-family: Consolas, "Microsoft YaHei", monospace; }
+    .quad { fill: #102035; stroke: #607995; stroke-dasharray: 4 3; }
+    .c0 { fill: #315784; stroke: #97caff; } .c1 { fill: #276663; stroke: #8eebd8; }
+    .c2 { fill: #66532d; stroke: #f4cf7a; } .c3 { fill: #563e70; stroke: #c9abf2; }
+    .good { fill: #204844; stroke: #8eebd8; } .bad { fill: #53323b; stroke: #f29aab; }
+  </style>
+  <defs>
+    <rect id="quad" class="quad" x="185" width="665" height="33" rx="6"/>
+    <g id="cells">
+      <rect x="200" width="150" height="25" rx="4"/><rect x="360" width="150" height="25" rx="4"/>
+      <rect x="520" width="150" height="25" rx="4"/><rect x="680" width="150" height="25" rx="4"/>
+    </g>
+  </defs>
+  <rect class="bg" width="1240" height="1220" rx="18"/>
+  <text class="title" x="36" y="46">lane 地址可以乱序：关键是同一 quad 的 4 个 lane 落在哪些 line</text>
+  <text class="small" x="38" y="76">共同条件：wave64，全 lane 活跃，每 lane 读 16 B；base 按 128 B 对齐；四种映射都恰好读同一段连续 1 KiB。</text>
+  <text class="small" x="38" y="100">格内为 lane → 相对 base 的字节偏移。虚线框 = 相邻 4 个 lane 的 quad；颜色 = 地址所在的 128 B line。</text>
+
+  <g transform="translate(0 120)">
+    <rect class="panel" x="35" width="1170" height="218" rx="13"/>
+    <text class="heading" x="53" y="32">① 顺序读取 · 基准</text>
+    <text class="small" x="53" y="56">chunk = lane；offset = 16 × chunk</text>
+    <use href="#quad" y="69"/><use href="#quad" y="105"/><use href="#quad" y="141"/><use href="#quad" y="177"/>
+    <text class="label" x="55" y="91">Q0 · L0–3</text><text class="label" x="55" y="127">Q1 · L4–7</text>
+    <text class="label" x="55" y="163">Q2 · L8–11</text><text class="label" x="55" y="199">Q3 · L12–15</text>
+    <use href="#cells" class="c0" y="73"/><use href="#cells" class="c0" y="109"/>
+    <use href="#cells" class="c1" y="145"/><use href="#cells" class="c1" y="181"/>
+    <g class="cell">
+      <text x="275" y="91">L0 → 0</text><text x="435" y="91">L1 → 16</text><text x="595" y="91">L2 → 32</text><text x="755" y="91">L3 → 48</text>
+      <text x="275" y="127">L4 → 64</text><text x="435" y="127">L5 → 80</text><text x="595" y="127">L6 → 96</text><text x="755" y="127">L7 → 112</text>
+      <text x="275" y="163">L8 → 128</text><text x="435" y="163">L9 → 144</text><text x="595" y="163">L10 → 160</text><text x="755" y="163">L11 → 176</text>
+      <text x="275" y="199">L12 → 192</text><text x="435" y="199">L13 → 208</text><text x="595" y="199">L14 → 224</text><text x="755" y="199">L15 → 240</text>
+    </g>
+    <rect class="good" x="880" y="72" width="303" height="130" rx="9"/>
+    <text class="heading" x="897" y="100">每 quad 1 次</text><text class="label" x="897" y="130">全 wave：16 次 / 100%</text>
+    <text class="small" x="897" y="157">Q0、Q1 虽在同一条 line，</text><text class="small" x="897" y="180">仍按两个 quad 分别计访问。</text>
+  </g>
+
+  <g transform="translate(0 354)">
+    <rect class="panel" x="35" width="1170" height="218" rx="13"/>
+    <text class="heading" x="53" y="32">② quad 内倒序 · lane 号不再与地址同向递增</text>
+    <text class="small" x="53" y="56">chunk = lane XOR 3；每组对齐的 4 个 chunk 内部置换（XOR swizzle 的一个例子）</text>
+    <use href="#quad" y="69"/><use href="#quad" y="105"/><use href="#quad" y="141"/><use href="#quad" y="177"/>
+    <text class="label" x="55" y="91">Q0 · L0–3</text><text class="label" x="55" y="127">Q1 · L4–7</text>
+    <text class="label" x="55" y="163">Q2 · L8–11</text><text class="label" x="55" y="199">Q3 · L12–15</text>
+    <use href="#cells" class="c0" y="73"/><use href="#cells" class="c0" y="109"/>
+    <use href="#cells" class="c1" y="145"/><use href="#cells" class="c1" y="181"/>
+    <g class="cell">
+      <text x="275" y="91">L0 → 48</text><text x="435" y="91">L1 → 32</text><text x="595" y="91">L2 → 16</text><text x="755" y="91">L3 → 0</text>
+      <text x="275" y="127">L4 → 112</text><text x="435" y="127">L5 → 96</text><text x="595" y="127">L6 → 80</text><text x="755" y="127">L7 → 64</text>
+      <text x="275" y="163">L8 → 176</text><text x="435" y="163">L9 → 160</text><text x="595" y="163">L10 → 144</text><text x="755" y="163">L11 → 128</text>
+      <text x="275" y="199">L12 → 240</text><text x="435" y="199">L13 → 224</text><text x="595" y="199">L14 → 208</text><text x="755" y="199">L15 → 192</text>
+    </g>
+    <rect class="good" x="880" y="72" width="303" height="130" rx="9"/>
+    <text class="heading" x="897" y="100">每 quad 1 次 · 不变</text><text class="label" x="897" y="130">全 wave：16 次 / 100%</text>
+    <text class="small" x="897" y="157">每个虚线框内仍覆盖</text><text class="small" x="897" y="180">同一段对齐的 64 B。</text>
+  </g>
+
+  <g transform="translate(0 588)">
+    <rect class="panel" x="35" width="1170" height="218" rx="13"/>
+    <text class="heading" x="53" y="32">③ quad 整体交换 · Q0 与 Q2 交换整组地址</text>
+    <text class="small" x="53" y="56">Q0 改读 128–191 B，Q2 改读 0–63 B；其它 quad 不变。没有拆散任何一组 4 个地址。</text>
+    <use href="#quad" y="69"/><use href="#quad" y="105"/><use href="#quad" y="141"/><use href="#quad" y="177"/>
+    <text class="label" x="55" y="91">Q0 · L0–3</text><text class="label" x="55" y="127">Q1 · L4–7</text>
+    <text class="label" x="55" y="163">Q2 · L8–11</text><text class="label" x="55" y="199">Q3 · L12–15</text>
+    <use href="#cells" class="c1" y="73"/><use href="#cells" class="c0" y="109"/>
+    <use href="#cells" class="c0" y="145"/><use href="#cells" class="c1" y="181"/>
+    <g class="cell">
+      <text x="275" y="91">L0 → 128</text><text x="435" y="91">L1 → 144</text><text x="595" y="91">L2 → 160</text><text x="755" y="91">L3 → 176</text>
+      <text x="275" y="127">L4 → 64</text><text x="435" y="127">L5 → 80</text><text x="595" y="127">L6 → 96</text><text x="755" y="127">L7 → 112</text>
+      <text x="275" y="163">L8 → 0</text><text x="435" y="163">L9 → 16</text><text x="595" y="163">L10 → 32</text><text x="755" y="163">L11 → 48</text>
+      <text x="275" y="199">L12 → 192</text><text x="435" y="199">L13 → 208</text><text x="595" y="199">L14 → 224</text><text x="755" y="199">L15 → 240</text>
+    </g>
+    <rect class="good" x="880" y="72" width="303" height="130" rx="9"/>
+    <text class="heading" x="897" y="100">每 quad 1 次 · 不变</text><text class="label" x="897" y="130">全 wave：16 次 / 100%</text>
+    <text class="small" x="897" y="157">line 的访问顺序变了，</text><text class="small" x="897" y="180">quad 内局部性没有变。</text>
+  </g>
+
+  <g transform="translate(0 822)">
+    <rect class="panel" x="35" width="1170" height="218" rx="13"/>
+    <text class="heading" x="53" y="32">④ 跨 quad 打散 · 总体连续，但每个 quad 都跨 4 条 line</text>
+    <text class="small" x="53" y="56">chunk = 16 × (lane % 4) + ⌊lane / 4⌋；全 wave 仍恰好覆盖 chunk 0–63，无重复、无缺口。</text>
+    <use href="#quad" y="69"/><use href="#quad" y="105"/><use href="#quad" y="141"/><use href="#quad" y="177"/>
+    <text class="label" x="55" y="91">Q0 · L0–3</text><text class="label" x="55" y="127">Q1 · L4–7</text>
+    <text class="label" x="55" y="163">Q2 · L8–11</text><text class="label" x="55" y="199">Q3 · L12–15</text>
+    <g class="c0"><rect x="200" y="73" width="150" height="25" rx="4"/><rect x="200" y="109" width="150" height="25" rx="4"/><rect x="200" y="145" width="150" height="25" rx="4"/><rect x="200" y="181" width="150" height="25" rx="4"/></g>
+    <g class="c1"><rect x="360" y="73" width="150" height="25" rx="4"/><rect x="360" y="109" width="150" height="25" rx="4"/><rect x="360" y="145" width="150" height="25" rx="4"/><rect x="360" y="181" width="150" height="25" rx="4"/></g>
+    <g class="c2"><rect x="520" y="73" width="150" height="25" rx="4"/><rect x="520" y="109" width="150" height="25" rx="4"/><rect x="520" y="145" width="150" height="25" rx="4"/><rect x="520" y="181" width="150" height="25" rx="4"/></g>
+    <g class="c3"><rect x="680" y="73" width="150" height="25" rx="4"/><rect x="680" y="109" width="150" height="25" rx="4"/><rect x="680" y="145" width="150" height="25" rx="4"/><rect x="680" y="181" width="150" height="25" rx="4"/></g>
+    <g class="cell">
+      <text x="275" y="91">L0 → 0</text><text x="435" y="91">L1 → 256</text><text x="595" y="91">L2 → 512</text><text x="755" y="91">L3 → 768</text>
+      <text x="275" y="127">L4 → 16</text><text x="435" y="127">L5 → 272</text><text x="595" y="127">L6 → 528</text><text x="755" y="127">L7 → 784</text>
+      <text x="275" y="163">L8 → 32</text><text x="435" y="163">L9 → 288</text><text x="595" y="163">L10 → 544</text><text x="755" y="163">L11 → 800</text>
+      <text x="275" y="199">L12 → 48</text><text x="435" y="199">L13 → 304</text><text x="595" y="199">L14 → 560</text><text x="755" y="199">L15 → 816</text>
+    </g>
+    <rect class="bad" x="880" y="72" width="303" height="130" rx="9"/>
+    <text class="heading" x="897" y="100">每 quad 4 次 · 拆分</text><text class="label" x="897" y="130">全 wave：64 次 / 25%</text>
+    <text class="small" x="897" y="157">同一颜色跨 quad 出现，</text><text class="small" x="897" y="180">也不能跨 quad 合成一次。</text>
+  </g>
+
+  <rect class="panel" x="35" y="1058" width="1170" height="136" rx="13"/>
+  <text class="label" x="53" y="1088">只画 Q0–Q3；Q4–Q15 按各自规则延续。百分比是 vL1D Coalescing 指标模型，不是 cache-line 字节利用率。</text>
+  <text class="small" x="53" y="1115">推荐条件：每 quad 的 4 × 16 B 覆盖一段对齐的 64 B，内部顺序不限；对 64 B / 128 B line 都能保持 quad 局部性。</text>
+  <text class="small" x="53" y="1142">④ 相比 ① 仍触及相同的 8 条 128 B line；增加的是 quad 级访问次数，不能据此说 HBM 流量增加 4 倍。</text>
+  <text class="small" x="53" y="1169">模型依据本节 rocprof-compute 指标定义推导；实际访问、缓存命中与吞吐影响需通过硬件计数器验证。</text>
+</svg>
