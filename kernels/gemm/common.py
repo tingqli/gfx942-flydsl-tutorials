@@ -4,22 +4,24 @@ import math
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 
-def test_gemm(M, N, K, launcher):
+def test_gemm(M, N, K, launcher, prep=None):
+    """prep: optional input transform (e.g. v0_preshuffle.preshuffle); the
+    reference still uses the original A, B."""
     stream = torch.cuda.current_stream().cuda_stream
     in_dtype = torch.bfloat16
     out_dtype = torch.float32
     A = torch.randn(M, K, dtype=in_dtype).cuda() / math.sqrt(K)
     B = torch.randn(N, K, dtype=in_dtype).cuda() / math.sqrt(K)
     C = torch.zeros(M, N, dtype=out_dtype).cuda()
+    a, b = (prep(A), prep(B)) if prep else (A, B)
 
     hints = {
-        "maxnreg": 256,
         "opt_level": 2,
         "llvm_options": {"amdgpu-mfma-vgpr-form": False}
     }
-    compiled = flyc.compile[hints](launcher, A, B, C, fx.Stream(stream))
+    compiled = flyc.compile[hints](launcher, a, b, C, fx.Stream(stream))
     
-    compiled(A, B, C, fx.Stream(stream))
+    compiled(a, b, C, fx.Stream(stream))
 
     ev_start = torch.cuda.Event(enable_timing=True)
     ev_end = torch.cuda.Event(enable_timing=True)
@@ -28,7 +30,7 @@ def test_gemm(M, N, K, launcher):
     for i in range(10):
         torch.cuda._sleep(1_000_000) # avoid CPU side overhead affecting timing
         ev_start.record()
-        compiled(A, B, C, fx.Stream(stream))
+        compiled(a, b, C, fx.Stream(stream))
         ev_end.record()
         torch.cuda.synchronize()
         dt_us = ev_start.elapsed_time(ev_end) * 1e3

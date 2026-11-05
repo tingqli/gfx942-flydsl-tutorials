@@ -11,6 +11,7 @@ v1/v2 的 `M/256 × N/256 = 32 × 38 = 1216 = 4 × 304` 个 CTA，恰为按 MI30
 | 文件 | 内容 | 最终实测 TFLOPS | 相对 `torch.matmul` |
 |---|---|---|---|
 | [v0.py](v0.py) | 1 wave/CTA，直接从显存读到寄存器做 MFMA（最终采用 128×128 wave tile） | 338 | 53.4% |
+| [v0_preshuffle.py](v0_preshuffle.py) | v0 + 寄存器双缓冲（ILP）+ 输入预重排，不用 LDS（§1.4） | | |
 | [v1.py](v1.py) | 4 wave/CTA，A/B 经 LDS 共享，XOR swizzle | 440 | 69.5% |
 | [v2.py](v2.py) | v1 + 单 wave 软件流水（4 region、寄存器预取、`rocdl.sched_*` 调度提示） | 649 | 102.5% |
 | [bench.py](bench.py) | 正确性 + 计时（含 `torch.matmul` 对照） | `torch.matmul`：633 | 100%（基准） |
@@ -46,8 +47,8 @@ python3 bench.py v1 v2              # 指定版本
 | 寄存器 | VGPR（向量）、AGPR（累加器）、SGPR（标量） | §1.0 |
 | CuTe layout / CuTe DSL | FlyDSL layout（`make_ordered_layout` 等） | §1.1 |
 | `mma.sync` / `wgmma` | MFMA（`v_mfma_*`） | §1.2 |
-| SASS（`cuobjdump -sass`） | gfx942 ISA（`FLYDSL_DEBUG_DUMP_ASM=1`） | §1.4 |
-| Nsight Systems / Compute | `rocprofv3`（kernel trace、PMC 计数器、ATT 指令级 trace） | §1.4 |
+| SASS（`cuobjdump -sass`） | gfx942 ISA（`FLYDSL_DEBUG_DUMP_ASM=1`） | §1.5 |
+| Nsight Systems / Compute | `rocprofv3`（kernel trace、PMC 计数器、ATT 指令级 trace） | §1.5 |
 | shared memory | LDS（Local Data Share） | §2.0 |
 | `__syncthreads()` | `s_barrier` | §2.0 |
 | 全芯片统一的 L2 | XCD：8 个芯粒，各有独立 L2；其后是 256 MB MALL | §2.0 |
@@ -169,8 +170,92 @@ v1 选择经 LDS 重排：它本来就要用 LDS 让 4 个 wave 共享 A、B，�
 
 > **NVIDIA 对照**：在 NVIDIA 上，一个 warp 算 128×128 需要每线程 512 个 fp32 累加寄存器，超过 255 的上限，所以通常由多个 warp（Hopper 上是一个 warpgroup）分担。CDNA3 的 wave64 + AGPR 让一个 wave 就能扛住 128×128。occupancy = 1 在这里是常态，和 NVIDIA 上高性能 GEMM 的思路一致：用寄存器换复用，延迟靠 ILP 而不是靠切 warp。
 
+### 1.4 优化：寄存器双缓冲（ILP）+ 输入预重排
 
-### 1.4 观察硬件行为
+§1.3 已经把寄存器用到头，v0 128×128 还剩两个问题：每个 K 步要等本步的 load 返回才能开始 MFMA；以及 §1.2 指出的按 MFMA 排布直接读显存。本节不引入 LDS，分别用 ILP 和预重排（§1.2 表中的第一种办法）处理，代码见 [v0_preshuffle.py](v0_preshuffle.py)，`ILP`、`PRESHUFFLE` 两个开关可以单独关闭。
+
+**ILP：寄存器双缓冲。**先发下一个 K 步的 16 条 load，再做当前 K 步的 128 条 MFMA，操作数寄存器从 64 个增加到 128 个 VGPR：
+
+```python
+for k, st in range(fx.Index(0), fx.Index(NK // 2), fx.Index(1), init=acc0 + gr(fx.Int32(0))):
+    st = list(st)
+    kt = fx.Int32(k) * 2
+    nxt = gr(kt + 1)                 # 预取 K 步 kt+1 ……
+    acc = dot(st[:NA], st[NA:])      # …… 同时计算 kt
+    interleave()                     # rocdl.sched_*：16 条 load 依次插在前 16 条 MFMA 之间
+    cur = gr((kt + 2) % NK)          # 预取 kt+2，同时计算 kt+1（最后一次迭代多读一次 tile 0，不使用）
+    acc = dot(acc, nxt)
+    interleave()
+    results = yield acc + cur
+```
+
+数据依赖只说明“可以”重叠，编译器不一定照做。下面三点都在 ISA 中确认过：
+
+- **一次迭代做两个 K 步。**只做一个 K 步时，循环末尾要把“下一步”的寄存器拷回“当前步”，拷贝要等 load 返回，预取就白做了；做两个 K 步时两组寄存器轮换，不需要拷贝。
+- **用 `rocdl.sched_*`（§3.7）固定 load 的位置。**否则 LLVM 会把 load 挪到使用处附近，预取失效。
+- **最后一个 K 步不剥到循环外。**剥出去后，循环外的 MFMA 也要引用循环携带的累加器和操作数，寄存器分配随之退化，实测 spill 了 77～164 个 VGPR。所以改为让最后一次迭代多读一次 tile 0。
+
+最终的循环体（两个 K 步）有 256 条 MFMA、32 条 `global_load_dwordx4`，等待都是 `s_waitcnt vmcnt(14)`～`vmcnt(21)`，即只等上一个 K 步的数据；没有 scratch，累加器基本原地更新，只有 4 条 `v_accvgpr_mov`。
+
+**预重排。**在 host 端把 A、B 一次性重排：每个 16 行 × 32 K 的 MFMA 块按 lane 顺序存成连续的 1 KiB，一条 load 的 64 个 lane 正好读连续的 1 KiB。kernel 只换视图，MFMA 部分与 v0 相同。这个布局只与 MFMA 的操作数块有关，与 BM、BN 无关。
+
+```python
+def preshuffle(X):    # X[16*rb + row, 32*kb + 8*kg + e] -> Y[rb, kb, kg, row, e]
+    R, K = X.shape
+    return X.view(R // 16, 16, K // 32, 4, 8).permute(0, 2, 3, 1, 4).contiguous()
+
+# kernel 中的视图：(8 elem, 64 lane, K/32, BM/16, grid_m)
+A = fx.make_view(fx.get_iter(A), fx.make_ordered_layout((8, 64, K // 32, BM // 16, grid_m), 0))
+A = A[None, None, None, None, bid_m]
+a = A[None, tid, k, i].load()        # v0 是 A[None, k * 4 + kg, row, i]
+```
+
+**结果**
+
+数据测于另一台 gfx942 机器（MI308X，80 CU，功耗墙更低；工具见 §1.5）。为了让 CTA 数仍是 CU 数的整数倍，形状改为 4096×5120×8192。TFLOPS 按同机 v0 128×128 与 v2 的实测值折算到本文量级（乘以 3.53，两者分别对应本文的 338 和 649）；L1 访问次数与 load 条数成正比，已换算到本文形状；其余列为同机实测，ATT 只追踪 1 个 CU 的 1 次 dispatch。
+
+| 版本 | TFLOPS（折算） | MFMA 利用率 | TA 忙碌 | L1 访问次数 | L2 之外读取 | ATT：`s_waitcnt vmcnt` | ATT：global_load 发射阻塞 |
+|---|---|---|---|---|---|---|---|
+| v0 128×128 | 338 | 42% | 98% | 1280M | 1.16 GB | 27.7%（每次 124 cycle） | 21.5%（每条 60 cycle） |
+| v0 + ILP | ≈357 | 44% | 97% | 1285M | 1.14 GB | 1.4% | **42.9%**（每条 118 cycle） |
+| v0 + 预重排（无 ILP） | ≈601 | 76% | 50% | 324M | 0.30 GB | 8.6%（每次 14 cycle） | 0.3% |
+| v0 + ILP + 预重排 | **≈638** | 80% | 49% | 325M | 0.46 GB | 2.0% | 6.7%（每条 10 cycle） |
+| v2（§3） | 649 | 81% | 32% | 169M | 0.30 GB | 1.6% | 1.4% |
+
+- MFMA 利用率 = `SQ_VALU_MFMA_BUSY_CYCLES` ÷（每个 XCD 的 `GRBM_GUI_ACTIVE` × CU 数 × 4），与按 FLOP 算出的结果一致；各版本的主频都在 1.37～1.39 GHz。
+- TA 忙碌 = `TA_TA_BUSY_sum` ÷（CU 数 × cycle 数）；L1 访问次数 = `TCP_TOTAL_CACHE_ACCESSES_sum`，即 L1 的 tag 访问次数。
+- L2 之外读取的口径同 §2.4。它还受形状和每个 XCD 的 CU 数影响，只看相对变化。
+- 两个 ATT 列是该类指令占 wave 时间的比例：`s_waitcnt vmcnt` 是等待时间；发射阻塞是 load 已轮到发射、却发不出去的时间（ATT 的 stall）。
+
+**1. ILP 藏住了等待，但时间转到了 load 发射阻塞上。**
+
+- `s_waitcnt vmcnt` 从 27.7% 降到 1.4%，global_load 的发射阻塞却从 21.5% 升到 42.9%，性能只提高约 5%。
+- wave 按顺序发射指令：load 发不出去，排在它后面的 MFMA 也发不出去。
+
+**2. 根本原因是按 MFMA 排布直接读显存。**
+
+- lane `l` 读第 `l%16` 行，相邻 lane 落在不同行、无法合并，每个 lane 的 16 B 各算一次 L1 访问：一条 `dwordx4` 要 64 次（实测 64.2 次），读连续 1 KiB 只要 16 次（每次 64 B）。
+- L1 每个 CU 每 cycle 最多处理约 1 次访问（实测 TA 忙碌时约 0.87 次），所以按 v0 的排布，有效带宽只有约 16 B/clk/CU。
+- v0 128×128 满速需要 32 B/clk/CU：每个 CU 4 个 wave，每个 K 步各读 16 KiB，对应 2048 cycle 的 MFMA。所以无论怎样做 ILP，MFMA 利用率的上限都约为 50%，折算到本文量级约 400 TFLOPS；实测 v0 与 v0 + ILP 停在 42%～44%。
+
+**3. 预重排证实了这一点。**
+
+- 只改 A、B 在显存中的排布：L1 访问降到 1/4，TA 忙碌减半；即使不加 ILP，load 的发射阻塞也降到 0.3%，性能到约 601 TFLOPS。
+- 额外收获：原排布每个 K 步只用到 128 B cache line 的一半，另一半要到下一个 K 步才用，中间可能已被挤出 L2；重排后一条 load 读满 8 条完整的 line。L2 之外读取降到 v0 的 26%～40%，与 v2 同一量级。
+- 再加 ILP，剩下的 `s_waitcnt` 等待（8.6%）也被藏住，约 638 TFLOPS，达到 v2 的 98%。
+
+**4. 剩下的差距与代价。**
+
+- 剩下的 6.7% 发射阻塞集中在每批 16 条 load 的后半段：越靠后的 load 阻塞越久（从 0～2 cycle 递增到 15～25 cycle），即连续发出的 load 在排队。把 load 分散到整个 K 步时，LLVM 的寄存器分配反而变差：累加器不再原地更新，多出上百条 `v_accvgpr_mov`，实测更慢。
+- 每个 wave 仍各读各的 A、B：L1 访问是 v2 的约 2 倍，TA 忙碌 49% 对 32%。复用停在寄存器层（§1.3），没有 v1/v2 那样的跨 wave 共享。
+- 预重排只适用于事先已知的数据（如推理权重），或由上游 kernel 直接按这个布局写出（§1.2）；任意输入仍要靠 v1/v2 经 LDS 重排。
+
+> **NVIDIA 对照**
+>
+> - NVIDIA 的 L1 在整个 warp 内合并地址，分散读取的代价大致与触及的 cache line 数成正比。CDNA3 上实测只有相邻 lane 能合并（每次 64 B），lane 顺序与地址顺序不一致时，代价按 lane 数算。
+> - 离线重排在 NVIDIA 上也常见：Marlin、TensorRT-LLM 的 weight-only GEMM 都会预先重排权重，使宽访存读到的数据直接符合 mma fragment 的排布。
+
+### 1.5 观察硬件行为
 
 ```bash
 FLYDSL_DEBUG_DUMP_ASM=1 FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./dumps python3 v0.py   # IR + 最终 ISA
@@ -676,7 +761,7 @@ MI300X（CDNA3，2023）同代的对手是 Hopper（H100 2022 / H200 2024）。
 |---|---|---|
 | 提高 occupancy，靠切 warp 藏延迟 | 本例 128×128/wave 占用较多寄存器，仅 1 wave/SIMD，主要靠 ILP 隐藏延迟；其它 tile 可权衡 TLP | §1.3、§3.0 |
 | 用 `ldmatrix` 把 smem 装成 fragment | 没有 `ldmatrix`，按 MFMA 排布直接用 `ds_read_b128` | §1.2 |
-| scoreboard / 依赖屏障等指定的那条指令 | `s_waitcnt` 只能等最老的 N 条，发射顺序决定流水深度 | §1.4、§3.7 |
+| scoreboard / 依赖屏障等指定的那条指令 | `s_waitcnt` 只能等最老的 N 条，发射顺序决定流水深度 | §1.5、§3.7 |
 | `cp.async` / TMA + 3~7 级 smem 流水 | 没有宽的异步拷贝，LDS 只有 64 KB；用寄存器当第二级 buffer | §2.0、§3.2 |
 | L2 全芯片共享 | 每个 XCD 独立 L2，实际 CTA→XCD 分配规律影响复用，需测量验证 | §2.0、§5 |
 | warp specialization + mbarrier + `setmaxnreg` | 没有部分 barrier 和运行时寄存器调整，不划算 | §3.0 |

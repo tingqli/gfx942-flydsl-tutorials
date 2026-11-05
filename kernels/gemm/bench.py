@@ -12,20 +12,33 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 
 from v0 import build_v0
+from v0_preshuffle import build_v0_preshuffle, preshuffle
 from v1 import build_v1
 from v2 import build_v2
 
-M, N, K = 16 * 2 * 256, 19 * 2 * 256, 8192
-HINTS = {"maxnreg": 256, "opt_level": 2, "llvm_options": {"amdgpu-mfma-vgpr-form": False}}
+props = torch.cuda.get_device_properties(0) 
+sm_count = props.multi_processor_count
+
+if sm_count == 304:
+    M, N, K = 16 * 2 * 256, 19 * 2 * 256, 8192
+else:
+    assert sm_count == 80
+    M, N, K = 8 * 2 * 256, 10 * 2 * 256, 8192
+
+HINTS = {"opt_level": 2, "llvm_options": {"amdgpu-mfma-vgpr-form": False}}
 
 CASES = {
     "v0_64x64": lambda: build_v0(64, 64, 1, M, N, K),
     "v0_128x128": lambda: build_v0(128, 128, 1, M, N, K),
+    "v0_ilp": lambda: build_v0_preshuffle(128, 128, 1, M, N, K, PRESHUFFLE=False),
+    "v0_preshuffle_noilp": lambda: build_v0_preshuffle(128, 128, 1, M, N, K, ILP=False),
+    "v0_preshuffle": lambda: build_v0_preshuffle(128, 128, 1, M, N, K),
     "v1": lambda: build_v1(256, 256, 1, M, N, K),
     "v1_flyswz": lambda: build_v1(256, 256, 1, M, N, K, SWIZZLE="fly"),
     "v2_nosched": lambda: build_v2(256, 256, 1, M, N, K, SCHED=False),
     "v2": lambda: build_v2(256, 256, 1, M, N, K),
 }
+PRESHUFFLED = {"v0_preshuffle", "v0_preshuffle_noilp"}   # inputs rearranged once on the host, not timed
 
 
 def timeit(fn, *args, iters=50, warmup=5):
@@ -63,11 +76,12 @@ def main(names):
             print(f"{name:<12} {us:9.1f} us {flop / us / 1e6:7.1f} TFLOPS  (hipBLASLt, bf16 out)")
             continue
         launcher = CASES[name]()
-        compiled = flyc.compile[HINTS](launcher, A, B, C, fx.Stream(stream))
+        a, b = (preshuffle(A), preshuffle(B)) if name in PRESHUFFLED else (A, B)
+        compiled = flyc.compile[HINTS](launcher, a, b, C, fx.Stream(stream))
         C.zero_()
-        compiled(A, B, C, fx.Stream(stream))
+        compiled(a, b, C, fx.Stream(stream))
         ok = torch.allclose(C, ref, atol=1e-5, rtol=1e-5)
-        us = timeit(lambda: compiled(A, B, C, fx.Stream(stream)))
+        us = timeit(lambda: compiled(a, b, C, fx.Stream(stream)))
         print(f"{name:<12} {us:9.1f} us {flop / us / 1e6:7.1f} TFLOPS  correct={ok}")
 
 
