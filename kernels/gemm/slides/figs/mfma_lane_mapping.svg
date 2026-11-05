@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 706" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 1106" role="img" aria-labelledby="title desc">
   <title id="title">MFMA 16×16×16 BF16：64 个 lane 的操作数与累加器排布</title>
-  <desc id="desc">左侧用四个彩色纵向 K 组表示 A 的每一行由 lane r、r+16、r+32、r+48 各提供四个 BF16；B 把行解释为 N。右侧用四个彩色横向 M 组表示 C 每个 lane 保存同一列中连续四行的 FP32 累加结果。选取行 0、1、2、15 和列 0、1、2、15 展示具体 lane 号，其余按公式生成。</desc>
+  <desc id="desc">按标准 GEMM 方位呈现 C[M,N]=A[M,K]乘B转置[K,N]：A 在左下，逻辑 B 转置在右上，C 在右下。A 的 K 沿水平方向、B 转置的 K 沿竖直方向，C 的 M 与 A 同向、N 与 B 转置同向。A 行 m 和 B 转置列 n 的四个 K 组分别由 lane m+16g 和 n+16g 提供，每 lane 四个 BF16。C 每列的四个 M 行组分别由 lane n+16g 保存，每 lane 四个同列 FP32。B 的显存布局仍是 N 行 K 连续，图中只改变逻辑呈现方向，不表示实际转置搬运。代表性行列是示意压缩，不按元素比例绘制。</desc>
   <style>
     text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #edf3fa; }
     .bg { fill: #0c1628; } .panel { fill: #17283e; stroke: #39506b; stroke-width: 1.5; }
@@ -15,13 +15,44 @@
     .formula { fill: #1d344c; stroke: #577496; stroke-width: 1.4; }
   </style>
   <defs><marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#adc8e7"/></marker></defs>
-  <rect class="bg" width="1240" height="706" rx="18"/>
+  <rect class="bg" width="1240" height="1106" rx="18"/>
   <text class="heading" x="38" y="46">MFMA：同一个 wave64，输入和输出的 lane 布局不同</text>
   <text class="muted" x="39" y="77">一条 v_mfma_f32_16x16x16_bf16：A/B 各 16×16 BF16 → C 的 16×16 FP32 累加器</text>
 
+  <rect class="formula" x="34" y="101" width="575" height="383" rx="14"/>
+  <text class="sub" x="54" y="140">标准 GEMM 方位：C = A × Bᵀ</text>
+  <text class="body" x="54" y="180">左下 A[M,K]：M ↓，K →</text>
+  <text class="body" x="54" y="215">右上 Bᵀ[K,N]：K ↓，N →</text>
+  <text class="body" x="54" y="250">右下 C[M,N]：M ↓，N →</text>
+  <text class="muted" x="54" y="296">B 的显存布局仍为 [N,K]，K 连续；</text>
+  <text class="muted" x="54" y="324">画成 Bᵀ 只是计算逻辑视图，不额外搬运或转置。</text>
+  <text class="muted" x="54" y="368">输入颜色表示 K 组，输出颜色表示 M 行组；</text>
+  <text class="muted" x="54" y="396">同色不代表输入与输出存放相同的元素。</text>
+  <text class="tiny" x="54" y="445">图内仅显示代表性行列，压缩示意，不按元素比例绘制。</text>
+
+  <rect class="panel" x="629" y="101" width="577" height="383" rx="14"/>
+  <text class="sub" x="649" y="138">Bᵀ[K,N]：每个 lane 提供同列 4 个 K 元素</text>
+  <text class="tiny" x="650" y="179">K ↓ / N →</text>
+  <text class="tiny" x="770" y="179">N = 0</text><text class="tiny" x="867" y="179">N = 1</text>
+  <text class="tiny" x="964" y="179">N = 2</text><text class="tiny" x="1060" y="179">… N = 15</text>
+  <rect class="group0 cell" x="750" y="194" width="436" height="48" rx="7"/>
+  <rect class="group1 cell" x="750" y="251" width="436" height="48" rx="7"/>
+  <rect class="group2 cell" x="750" y="308" width="436" height="48" rx="7"/>
+  <rect class="group3 cell" x="750" y="365" width="436" height="48" rx="7"/>
+  <path class="separator" d="M844 194 V413 M941 194 V413 M1038 194 V413"/>
+  <text class="body" x="650" y="225">K 0–3</text><text class="body" x="650" y="282">K 4–7</text>
+  <text class="body" x="650" y="339">K 8–11</text><text class="body" x="650" y="396">K 12–15</text>
+  <text class="pill" x="797" y="225">L0</text><text class="pill" x="894" y="225">L1</text><text class="pill" x="991" y="225">L2</text><text class="pill" x="1110" y="225">L15</text>
+  <text class="pill" x="797" y="282">L16</text><text class="pill" x="894" y="282">L17</text><text class="pill" x="991" y="282">L18</text><text class="pill" x="1110" y="282">L31</text>
+  <text class="pill" x="797" y="339">L32</text><text class="pill" x="894" y="339">L33</text><text class="pill" x="991" y="339">L34</text><text class="pill" x="1110" y="339">L47</text>
+  <text class="pill" x="797" y="396">L48</text><text class="pill" x="894" y="396">L49</text><text class="pill" x="991" y="396">L50</text><text class="pill" x="1110" y="396">L63</text>
+  <text class="body" x="649" y="453">lane = N列号 + 16 × K组号</text>
+  <path class="arrow" d="M970 485 V499"/>
+
+  <g transform="translate(0 400)">
   <rect class="panel" x="34" y="101" width="575" height="483" rx="14"/>
-  <text class="sub" x="54" y="138">A / B：每个 lane 提供 4 个 K 元素</text>
-  <text class="muted" x="54" y="164">A 行 r（B 则是 N 行），沿 K 分给 4 个 lane 组</text>
+  <text class="sub" x="54" y="138">A[M,K]：每个 lane 提供同行 4 个 K 元素</text>
+  <text class="muted" x="54" y="164">M ↓，K →：A 行 r 沿 K 分给 4 个 lane 组</text>
   <text class="tiny" x="62" y="215">行 r</text>
   <text class="tiny" x="154" y="215">K 0–3</text><text class="tiny" x="262" y="215">K 4–7</text>
   <text class="tiny" x="371" y="215">K 8–11</text><text class="tiny" x="473" y="215">K 12–15</text>
@@ -42,11 +73,13 @@
   <text class="pill" x="189" y="475">L15</text><text class="pill" x="295" y="475">L31</text><text class="pill" x="401" y="475">L47</text><text class="pill" x="507" y="475">L63</text>
   <rect class="formula" x="52" y="510" width="540" height="53" rx="8"/>
   <text class="body" x="68" y="543">lane = r + 16 × K组号，组号 = 0, 1, 2, 3</text>
+  </g>
 
+  <g transform="translate(0 400)">
   <path class="arrow" d="M612 337 H628"/>
   <rect class="panel" x="629" y="101" width="577" height="483" rx="14"/>
-  <text class="sub" x="649" y="138">C：每个 lane 持有 4 个同列 FP32</text>
-  <text class="muted" x="649" y="164">四个连续的 M 行被一个 lane 保存为累加向量</text>
+  <text class="sub" x="649" y="138">C[M,N]：每个 lane 持有 4 个同列 FP32</text>
+  <text class="muted" x="649" y="164">M ↓，N →：四个连续 M 行由一个 lane 保存</text>
   <text class="tiny" x="650" y="215">M 行</text>
   <text class="tiny" x="752" y="215">N = 0</text><text class="tiny" x="851" y="215">N = 1</text>
   <text class="tiny" x="948" y="215">N = 2</text><text class="tiny" x="1048" y="215">… N = 15</text>
@@ -63,8 +96,9 @@
   <text class="pill" x="797" y="470">L48</text><text class="pill" x="894" y="470">L49</text><text class="pill" x="991" y="470">L50</text><text class="pill" x="1110" y="470">L63</text>
   <rect class="formula" x="647" y="510" width="541" height="53" rx="8"/>
   <text class="body" x="662" y="543">lane = N列号 + 16 × ⌊M / 4⌋</text>
+  </g>
 
-  <rect class="formula" x="34" y="606" width="1172" height="73" rx="12"/>
-  <text class="body" x="54" y="637">一次 16 B load / lane = 连续 8 个 BF16：前 4 个供一条 K=16 MFMA，后 4 个供下一条。</text>
-  <text class="muted" x="54" y="663">A 和 B 使用相同 K 重排；所以两条 MFMA 合起来覆盖 32 个 K，结果寄存器的 lane 布局不变。</text>
+  <rect class="formula" x="34" y="1006" width="1172" height="73" rx="12"/>
+  <text class="body" x="54" y="1037">一次 16 B load / lane = 连续 8 个 BF16：前 4 个供一条 K=16 MFMA，后 4 个供下一条。</text>
+  <text class="muted" x="54" y="1063">A 和 B 使用相同 K 重排；所以两条 MFMA 合起来覆盖 32 个 K，结果寄存器的 lane 布局不变。</text>
 </svg>

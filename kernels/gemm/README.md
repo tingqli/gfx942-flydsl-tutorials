@@ -103,9 +103,9 @@ for k, acc in range(fx.Index(0), fx.Index(K//32), fx.Index(1), init=acc_init):  
 
 技巧：每个 lane 一次 load **8 个连续 K（16 B，`global_load_dwordx4` / `ds_read_b128`）**，前 4 个和后 4 个分别喂两条 MFMA。A、B 用同样的 K 排列，`Σk A·B` 不变。所以一个 wave 每步覆盖 32 个 K，所有 load 都是 16 B 宽。
 
-**单条 MFMA 的 lane 排布**：左侧彩色 K 组表示 A/B 各 lane 提供的 4 个 BF16；右侧彩色 M 组表示每 lane 持有的同列 4 个 FP32 累加值。图中展示代表性行/列，其余按图内公式映射全部 64 个 lane。
+**单条 MFMA 的 lane 排布**：按标准 GEMM 方位画出 `C[M,N] = A[M,K] × Bᵀ[K,N]`：**A 在左下，Bᵀ 在右上，C 在右下**。A 的 K 组沿水平方向，Bᵀ 的 K 组沿竖直方向，各格表示一个 lane 提供的 4 个 BF16；C 的彩色 M 行组表示每 lane 持有的同列 4 个 FP32 累加值。B 的显存布局仍为 `[N,K]`、K 连续，画成 Bᵀ 只是逻辑视图，不表示额外转置搬运。图中展示代表性行/列（压缩示意），其余按图内公式映射全部 64 个 lane。
 
-![MFMA 16×16×16 的 A/B 操作数和 C 结果分别如何分布到 64 个 lane](slides/figs/mfma_lane_mapping.svg)
+![标准 GEMM 方位的 MFMA lane 排布：左下 A、右上 B 转置、右下 C，分别展示输入 K 分组和输出 M 分组](slides/figs/mfma_lane_mapping.svg)
 
 [单独查看 MFMA lane 排布（SVG）](slides/figs/mfma_lane_mapping.svg)
 
