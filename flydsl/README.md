@@ -19,3 +19,4 @@ FlyDSL的对象，函数都有什么作用，其行为在最终汇编会如何�
 | [LDS_101](lds_101.ipynb) | 用 `@fx.struct` 定义 LDS 结构并分配；LDS tensor 的 `ds_*` 指令；bank conflict 与 `Swizzle` 的几种写法；HBM→LDS DMA 的各种接口、同步/异步等待，以及封装 `dma_to_lds`。ISA 对比 gfx942 / gfx950。 |
 | [register_101](register_101.ipynb) | `.load()` 之后的寄存器类型（`fx.Vector`、标量 `Numeric`、寄存器 tensor）及其自带操作的 ISA；跨 lane 操作（shuffle、DPP、ballot）；`fx.rocdl` 专用指令；用 `llvm.call_intrinsic`、`vector.insert`、`llvm.inline_asm` 补上没有封装的功能。ISA 对比 gfx942 / gfx950。 |
 | [kernel_101](kernel_101.ipynb) | kernel 文件的组织方式：`@flyc.kernel` 与 `@flyc.jit` 的分工；trace 与 JIT 缓存 key；为什么用 `lru_cache` 修饰的 `build(...)` 传编译期参数；AST 改写对 `if`/`for` 的影响与常见坑；几种 for loop 写法生成的 IR/ISA；子函数加不加 `@flyc.jit` 的区别；kernel 里为什么不能 launch kernel。 |
+| [waitcnt_101](waitcnt_101.ipynb) | 什么时候要手写 `s_waitcnt`：数据进寄存器时编译器在第一次使用前插最少的等待（循环里也一样），手写只会更严；`gpu.barrier` 自带 `lgkmcnt(0)`；异步 DMA 到 LDS、inline asm 访存必须自己等；手数 `vmcnt` 会因调度顺序数错，异步 DMA 用 `wait_asyncmark`。ISA 对比 gfx942 / gfx950。 |
