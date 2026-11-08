@@ -11,9 +11,20 @@ from flydsl.expr.typing import Vector as Vec
 
 
 
-def build_v0(BM, BN, OCCUPANCY, M, N, K):
+def build_v0(BM, BN, OCCUPANCY, M, N, K, SLICE=False, INNER="N"):
+    # Compile-time knobs (used by flydsl/pipeline_101; defaults = the original v0):
+    #   SLICE: index A/B with the dynamic coordinates (kk, row) first, then with the
+    #          static tile number -> one base pointer + constant offsets per operand
+    #          instead of a full i32 index per load.
+    #   INNER: which MFMA tile loop is innermost: "N" (for i: for j) or "M" (for j: for i).
+    assert INNER in ("N", "M")
     grid_size = (M//BM, N//BN, 1)
     block_size = (64, 1, 1)
+    NI, NJ = BM//16, BN//16
+    # visiting order of the (i, j) MFMA tiles inside one K step
+    TILES = ([(i, j) for i in range(NI) for j in range(NJ)] if INNER == "N"
+             else [(i, j) for j in range(NJ) for i in range(NI)])
+
     @flyc.kernel(known_block_size=block_size)
     def gemm_v0(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
         # 1wave/CTA, each CTA computes a BMxBN tile of C
@@ -41,24 +52,28 @@ def build_v0(BM, BN, OCCUPANCY, M, N, K):
         row = tid % 16
         kg = tid // 16
 
-        NI, NJ = BM//16, BN//16
         acc_init = [fx.full(4, 0.0, fx.Float32) for _ in range_constexpr(NI * NJ)]
         # runtime scf.for (typed bounds => not unrolled); accumulators are loop-carried
         for k, acc in range(fx.Index(0), fx.Index(K//32), fx.Index(1), init=acc_init):
             acc = list(acc)
             kk = fx.Int32(k) * 4 + kg  # loop iv is index-typed, tid is Int32
             # Load A and B tiles for this k iteration (8 bf16 per lane, one 16 B load)
-            a_tile = [A[None, kk, row, i].load().bitcast(fx.Int16) for i in range_constexpr(NI)]
-            b_tile = [B[None, kk, row, j].load().bitcast(fx.Int16) for j in range_constexpr(NJ)]
+            if const_expr(SLICE):
+                Ak, Bk = A[None, kk, row, None], B[None, kk, row, None]
+                a_tile = [Ak[None, i].load().bitcast(fx.Int16) for i in range_constexpr(NI)]
+                b_tile = [Bk[None, j].load().bitcast(fx.Int16) for j in range_constexpr(NJ)]
+            else:
+                a_tile = [A[None, kk, row, i].load().bitcast(fx.Int16) for i in range_constexpr(NI)]
+                b_tile = [B[None, kk, row, j].load().bitcast(fx.Int16) for j in range_constexpr(NJ)]
             # Compute C tile: two K16 MFMAs per 8-element lane chunk
-            for i in range_constexpr(NI):
-                for j in range_constexpr(NJ):
-                    for h in range_constexpr(2):
-                        sel = [4 * h + e for e in range(4)]
-                        acc[i * NJ + j] = fx.rocdl.mfma_f32_16x16x16bf16_1k(T.f32x4, 
-                                                [a_tile[i].shuffle(a_tile[i], sel),
-                                                b_tile[j].shuffle(b_tile[j], sel),
-                                                acc[i * NJ + j], 0, 0, 0])
+            for t in range_constexpr(NI * NJ):
+                i, j = TILES[t]
+                for h in range_constexpr(2):
+                    sel = [4 * h + e for e in range(4)]
+                    acc[i * NJ + j] = fx.rocdl.mfma_f32_16x16x16bf16_1k(T.f32x4,
+                                            [a_tile[i].shuffle(a_tile[i], sel),
+                                            b_tile[j].shuffle(b_tile[j], sel),
+                                            acc[i * NJ + j], 0, 0, 0])
             results = yield acc
 
         # Output: lane l holds C[m = 4*(l//16) + r, n = l % 16], r = 0..3

@@ -1,0 +1,57 @@
+本机 GPU gfx950；GEMM 4096x4096x4096 bf16 -> fp32，BM = BN = 128，1 个 wave / block
+
+==== 1. fx.gemm 的 13 种遍历顺序（tiled，先发 A 后发 B）
+               | 正确 |    us | TFLOPS | 下沉 | 串行等待 |      被等 load 已经过的 MFMA
+None           | True | 401.0 |  342.7 |    6 |        6 |        [1, 1, 1, 1, 1, 1, 2]
+kmn            | True | 311.0 |  441.9 |    6 |        1 |                          [0]
+knm            | True | 390.2 |  352.2 |    6 |        4 |      [1, 1, 1, 1, 1, 13, 14]
+mkn            | True | 306.6 |  448.2 |    6 |        0 |  [8, 15, 22, 29, 36, 43, 51]
+mnk            | True | 304.6 |  451.2 |    6 |        0 |  [8, 15, 22, 29, 36, 43, 51]
+nkm            | True | 396.5 |  346.6 |    6 |        4 |       [1, 1, 1, 1, 1, 3, 12]
+nmk            | True | 400.6 |  343.1 |    6 |        6 |        [1, 1, 1, 1, 1, 1, 2]
+kmn_serpentine | True | 312.0 |  440.5 |    6 |        0 | [16, 16, 16, 16, 16, 16, 18]
+knm_serpentine | True | 402.7 |  341.3 |    6 |        4 |              [1, 1, 1, 1, 0]
+mkn_serpentine | True | 310.4 |  442.8 |    6 |        0 |                 [12, 13, 60]
+mnk_serpentine | True | 305.5 |  449.9 |    6 |        0 |  [8, 15, 22, 29, 36, 43, 51]
+nkm_serpentine | True | 399.8 |  343.8 |    6 |        4 |       [1, 1, 1, 1, 1, 5, 12]
+nmk_serpentine | True | 400.3 |  343.3 |    6 |        6 |        [1, 1, 1, 1, 1, 1, 2]
+
+==== 2. 遍历顺序名字的含义（BM = BN = 32，LLVM IR 里前 8 条 MFMA）
+     | 最内层 |                                        前 8 条 MFMA
+None |      N | A0·B0 A0·B1 A1·B0 A1·B1 A2·B2+ A2·B3+ A3·B2+ A3·B3+
+mnk  |      M | A0·B0 A1·B0 A0·B1 A1·B1 A2·B2+ A3·B2+ A2·B3+ A3·B3+
+nmk  |      N | A0·B0 A0·B1 A1·B0 A1·B1 A2·B2+ A2·B3+ A3·B2+ A3·B3+
+kmn  |      K | A0·B0 A1·B1+ A2·B0 A3·B1+ A0·B2 A1·B3+ A2·B2 A3·B3+
+mkn  |      M | A0·B0 A1·B0 A2·B1+ A3·B1+ A0·B2 A1·B2 A2·B3+ A3·B3+
+knm  |      K | A0·B0 A1·B1+ A0·B2 A1·B3+ A2·B0 A3·B1+ A2·B2 A3·B3+
+
+==== 3. 五个版本（默认调度）：load 顺序、下沉条数、被等 load 已经过的 MFMA 数
+            | 正确 |    us | TFLOPS |        load 顺序 | 下沉 | 串行等待 |        被等 load 已经过的 MFMA | gfx950 同
+v0          | True | 302.4 |  454.6 | ABABABABABABABAB |    0 |        0 | [1, 2, 3, 5, 9, 10, 11, 14, …] |      True
+v0_slice    | True | 397.9 |  345.4 | AAAAAAAABBBBBBBB |    6 |        6 |          [1, 1, 1, 1, 1, 1, 1] |      True
+v0_slice_ji | True | 303.9 |  452.3 | AAAAAAAABBBBBBBB |    6 |        0 |    [8, 15, 22, 29, 36, 43, 50] |      True
+tiled 默认  | True | 396.9 |  346.3 | AAAAAAAABBBBBBBB |    6 |        6 |          [1, 1, 1, 1, 1, 1, 2] |      True
+tiled MNK   | True | 306.1 |  449.0 | AAAAAAAABBBBBBBB |    6 |        0 |    [8, 15, 22, 29, 36, 43, 51] |      True
+
+==== 4. 对调 copy 顺序（TFLOPS / 串行等待）
+     |    先发 A |    先发 B
+None | 342.6 / 6 | 450.5 / 0
+mnk  | 449.3 / 0 | 342.7 / 6
+nmk  | 342.7 / 6 | 449.5 / 0
+kmn  | 441.2 / 1 | 345.4 / 3
+knm  | 356.3 / 4 | 453.2 / 0
+
+==== 5. 关掉 LLVM 的机器指令调度器（TFLOPS / 下沉 / 串行等待）
+            |          默认 |     关 pre-RA | 关 pre-RA + post-RA
+v0          | 456.3 / 0 / 0 | 454.6 / 0 / 0 |       457.7 / 0 / 0
+v0_slice    | 345.0 / 6 / 6 | 346.3 / 6 / 6 |       454.0 / 0 / 0
+v0_slice_ji | 456.5 / 6 / 0 | 453.8 / 6 / 0 |       456.9 / 0 / 0
+tiled 默认  | 346.5 / 6 / 6 | 345.8 / 6 / 6 |       457.0 / 0 / 0
+tiled MNK   | 448.9 / 6 / 0 | 449.5 / 6 / 0 |       450.7 / 0 / 0
+
+==== 6. copy 和 gemm 之间加 rocdl.sched_barrier(0)（默认调度）
+                           | 正确 |    us | TFLOPS | 下沉 | 串行等待 |     被等 load 已经过的 MFMA
+tiled 默认                 | True | 401.4 |  342.4 |    6 |        6 |       [1, 1, 1, 1, 1, 1, 2]
+tiled 默认 + sched_barrier | True | 302.4 |  454.5 |    0 |        0 |       [1, 2, 3, 4, 5, 6, 7]
+tiled MNK                  | True | 302.1 |  454.9 |    6 |        0 | [8, 15, 22, 29, 36, 43, 51]
+tiled MNK + sched_barrier  | True | 300.4 |  457.5 |    0 |        0 | [8, 16, 24, 32, 40, 48, 56]
