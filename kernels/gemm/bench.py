@@ -21,6 +21,8 @@ sm_count = props.multi_processor_count
 
 if sm_count == 304:
     M, N, K = 16 * 2 * 256, 19 * 2 * 256, 8192
+elif sm_count == 256:
+    M, N, K = 16 * 2 * 256, 16 * 2 * 256, 8192
 else:
     assert sm_count == 80
     M, N, K = 8 * 2 * 256, 10 * 2 * 256, 8192

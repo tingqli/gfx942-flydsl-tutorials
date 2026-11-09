@@ -1,0 +1,34 @@
+# gfx950 MI350X，GEMM 8192x8192x8192 bf16（v0_preshuffle / v2 输出 fp32，torch 输出 bf16），每个 case 10 次 dispatch 的中位数（时间）/ 平均（计数器）
+torch: Custom_Cijk_Alik_Bljk_BBS_BH_MT256x256x64_MI16x16x1_UserArgs_shortname0_gfx950
+v0_preshuffle: gemm_v0_preshuffle_0
+v0_preshuffle_k32: gemm_v0_preshuffle_0
+v2: gemm_v2_0
+v2_k32: gemm_v2_0
+
+                                              torch         v0_preshuffle     v0_preshuffle_k32                    v2                v2_k32
+时间 (us)                                       893.7                1440.7                1055.2                1455.2                1075.0
+TFLOPS                                       1230.3                 763.2                1042.0                 755.6                1022.8
+block x 线程                               1024 x 256             4096 x 64             4096 x 64            1024 x 256            1024 x 256
+LDS (KB)                                      130.0                   0.0                   0.0                  64.0                  64.0
+每条 MFMA 的 FLOP                                16384                  8192                 16384                  8192                 16384
+FLOP / MFMA 忙碌周期                               1022                   512                  1024                   512                  1024
+MFMA 忙碌                                       87.4%                 84.8%                 69.5%                 81.3%                 67.0%
+计数时主频 (MHz)                                    1387                  1761                  1466                  1791                  1497
+wave 等待指令                                     51.7%                 57.1%                 49.5%                 55.8%                 42.1%
+global/buffer load 条数 (M)                      8.39                 16.84                 16.84                   8.4                  8.39
+LDS 指令 (M)                                    16.78                   0.0                   0.0                 25.17                 25.17
+  其中读 / 写 (M)                          16.78 / 0.00           0.00 / 0.00           0.00 / 0.00          16.78 / 8.39          16.78 / 8.39
+load 直写 LDS 的 wave (M)                         8.39                   0.0                   0.0                   0.0                   0.0
+LDS bank 冲突 (M 周期)                            67.11                   0.0                   0.0                   0.0                   0.0
+L1 访问 (M)                                     136.3                 273.7                 273.7                 140.0                 138.4
+L1→L2 读请求 (M)                                  67.1                 107.3                 112.9                  67.1                  67.1
+TA 忙碌                                         49.5%                 48.4%                 92.2%                 22.7%                 39.8%
+L2 命中                                         80.3%                 86.8%                 87.0%                 79.3%                 79.3%
+L2 之外读取 (GB)                                   1.61                  1.63                  1.64                  1.61                  1.61
+
+# 原始计数器（每次 dispatch 平均）
+torch us_pmc=866.828 SQ_INSTS_MFMA=6.71703e+07 SQ_INSTS_VALU_MFMA_MOPS_BF16=2.15142e+09 SQ_VALU_MFMA_BUSY_CYCLES=1.07571e+09 GRBM_GUI_ACTIVE=9.62039e+06 SQ_WAVES=4096 SQ_WAVE_CYCLES=2.9474e+08 SQ_BUSY_CYCLES=3.69521e+07 SQ_WAIT_INST_ANY=1.52338e+08 SQ_INSTS_VMEM_RD=8.38861e+06 SQ_INSTS_LDS=1.67772e+07 SQ_LDS_BANK_CONFLICT=6.71089e+07 SQ_INSTS_VALU=7.057e+07 TCC_HIT_sum=5.56053e+07 TCC_MISS_sum=1.36325e+07 TCC_REQ_sum=6.92378e+07 TCC_EA0_RDREQ_sum=1.25847e+07 TCC_EA0_RDREQ_32B_sum=0 TCC_EA0_RDREQ_64B_sum=1784.4 TA_BUSY_avr=595244 TCP_TOTAL_CACHE_ACCESSES_sum=1.36315e+08 TCP_TCC_READ_REQ_sum=6.71089e+07 SQ_INSTS_LDS_LOAD=1.67772e+07 SQ_INSTS_LDS_STORE=0 TA_BUFFER_READ_LDS_WAVEFRONTS_sum=8.38861e+06 TA_FLAT_READ_LDS_WAVEFRONTS_sum=0
+v0_preshuffle us_pmc=1404.61 SQ_INSTS_MFMA=1.34218e+08 SQ_INSTS_VALU_MFMA_MOPS_BF16=2.14748e+09 SQ_VALU_MFMA_BUSY_CYCLES=2.14748e+09 GRBM_GUI_ACTIVE=1.97866e+07 SQ_WAVES=4096 SQ_WAVE_CYCLES=6.1039e+08 SQ_BUSY_CYCLES=7.67416e+07 SQ_WAIT_INST_ANY=3.48335e+08 SQ_INSTS_VMEM_RD=1.68428e+07 SQ_INSTS_LDS=0 SQ_LDS_BANK_CONFLICT=0 SQ_INSTS_VALU=1.93249e+08 TCC_HIT_sum=9.76363e+07 TCC_MISS_sum=1.48361e+07 TCC_REQ_sum=1.12472e+08 TCC_EA0_RDREQ_sum=1.27071e+07 TCC_EA0_RDREQ_32B_sum=0 TCC_EA0_RDREQ_64B_sum=1770.18 TA_BUSY_avr=1.1971e+06 TCP_TOTAL_CACHE_ACCESSES_sum=2.73678e+08 TCP_TCC_READ_REQ_sum=1.0728e+08 SQ_INSTS_LDS_LOAD=0 SQ_INSTS_LDS_STORE=0 TA_BUFFER_READ_LDS_WAVEFRONTS_sum=0 TA_FLAT_READ_LDS_WAVEFRONTS_sum=0
+v0_preshuffle_k32 us_pmc=1028.39 SQ_INSTS_MFMA=6.71089e+07 SQ_INSTS_VALU_MFMA_MOPS_BF16=2.14748e+09 SQ_VALU_MFMA_BUSY_CYCLES=1.07374e+09 GRBM_GUI_ACTIVE=1.20631e+07 SQ_WAVES=4096 SQ_WAVE_CYCLES=3.75065e+08 SQ_BUSY_CYCLES=4.73952e+07 SQ_WAIT_INST_ANY=1.85742e+08 SQ_INSTS_VMEM_RD=1.68428e+07 SQ_INSTS_LDS=0 SQ_LDS_BANK_CONFLICT=0 SQ_INSTS_VALU=1.18313e+08 TCC_HIT_sum=1.00197e+08 TCC_MISS_sum=1.50352e+07 TCC_REQ_sum=1.15232e+08 TCC_EA0_RDREQ_sum=1.2836e+07 TCC_EA0_RDREQ_32B_sum=0 TCC_EA0_RDREQ_64B_sum=1474.64 TA_BUSY_avr=1.38978e+06 TCP_TOTAL_CACHE_ACCESSES_sum=2.73678e+08 TCP_TCC_READ_REQ_sum=1.12869e+08 SQ_INSTS_LDS_LOAD=0 SQ_INSTS_LDS_STORE=0 TA_BUFFER_READ_LDS_WAVEFRONTS_sum=0 TA_FLAT_READ_LDS_WAVEFRONTS_sum=0
+v2 us_pmc=1439.85 SQ_INSTS_MFMA=1.34218e+08 SQ_INSTS_VALU_MFMA_MOPS_BF16=2.14748e+09 SQ_VALU_MFMA_BUSY_CYCLES=2.14748e+09 GRBM_GUI_ACTIVE=2.06247e+07 SQ_WAVES=4096 SQ_WAVE_CYCLES=6.38799e+08 SQ_BUSY_CYCLES=7.99891e+07 SQ_WAIT_INST_ANY=3.5634e+08 SQ_INSTS_VMEM_RD=8.4009e+06 SQ_INSTS_LDS=2.51658e+07 SQ_LDS_BANK_CONFLICT=0 SQ_INSTS_VALU=1.65777e+08 TCC_HIT_sum=5.67538e+07 TCC_MISS_sum=1.47929e+07 TCC_REQ_sum=7.15467e+07 TCC_EA0_RDREQ_sum=1.25861e+07 TCC_EA0_RDREQ_32B_sum=0 TCC_EA0_RDREQ_64B_sum=2637.64 TA_BUSY_avr=584713 TCP_TOTAL_CACHE_ACCESSES_sum=1.39985e+08 TCP_TCC_READ_REQ_sum=6.71089e+07 SQ_INSTS_LDS_LOAD=1.67772e+07 SQ_INSTS_LDS_STORE=8.38861e+06 TA_BUFFER_READ_LDS_WAVEFRONTS_sum=0 TA_FLAT_READ_LDS_WAVEFRONTS_sum=0
+v2_k32 us_pmc=1045.35 SQ_INSTS_MFMA=6.71089e+07 SQ_INSTS_VALU_MFMA_MOPS_BF16=2.14748e+09 SQ_VALU_MFMA_BUSY_CYCLES=1.07374e+09 GRBM_GUI_ACTIVE=1.25187e+07 SQ_WAVES=4096 SQ_WAVE_CYCLES=3.77987e+08 SQ_BUSY_CYCLES=4.73489e+07 SQ_WAIT_INST_ANY=1.59152e+08 SQ_INSTS_VMEM_RD=8.38861e+06 SQ_INSTS_LDS=2.51658e+07 SQ_LDS_BANK_CONFLICT=0 SQ_INSTS_VALU=9.86604e+07 TCC_HIT_sum=5.66089e+07 TCC_MISS_sum=1.47356e+07 TCC_REQ_sum=7.13446e+07 TCC_EA0_RDREQ_sum=1.25856e+07 TCC_EA0_RDREQ_32B_sum=0 TCC_EA0_RDREQ_64B_sum=2343.45 TA_BUSY_avr=622856 TCP_TOTAL_CACHE_ACCESSES_sum=1.38412e+08 TCP_TCC_READ_REQ_sum=6.71089e+07 SQ_INSTS_LDS_LOAD=1.67772e+07 SQ_INSTS_LDS_STORE=8.38861e+06 TA_BUFFER_READ_LDS_WAVEFRONTS_sum=0 TA_FLAT_READ_LDS_WAVEFRONTS_sum=0

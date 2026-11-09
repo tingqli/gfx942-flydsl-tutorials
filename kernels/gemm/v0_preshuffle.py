@@ -14,6 +14,9 @@
 # rocdl.sched_* 把 load 排在 MFMA 前段（同 v2 §3.7），否则 LLVM 会把它们挪到使用处附近。
 #
 # 开关：PRESHUFFLE=False 读原始布局（只加 ILP）；ILP=False 用 v0 的循环（只预重排）。
+# K32=True（只用于 gfx950）：每个 lane 的 16 B（8 个连续 K）不再拆给两条 16x16x16，
+# 而是整个交给一条 v_mfma_f32_16x16x32_bf16。gfx950 的 BF16 矩阵吞吐翻倍靠的是这条新指令，
+# 16x16x16 没有变快（见 README §4.1）。gfx942 没有这条指令，编译会失败。
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -29,11 +32,12 @@ def preshuffle(X):
     return X.view(R // 16, 16, K // 32, 4, 8).permute(0, 2, 3, 1, 4).contiguous()
 
 
-def build_v0_preshuffle(BM, BN, OCCUPANCY, M, N, K, PRESHUFFLE=True, ILP=True):
+def build_v0_preshuffle(BM, BN, OCCUPANCY, M, N, K, PRESHUFFLE=True, ILP=True, K32=False):
     NK = K // 32                # K-steps: one 16 B load per lane covers 32 K
     assert NK % 2 == 0
     NI, NJ = BM // 16, BN // 16
     NA = NI * NJ
+    NMFMA = NA if K32 else 2 * NA     # MFMAs per K-step
     grid_size = (M // BM, N // BN, 1)
     block_size = (64, 1, 1)
 
@@ -72,8 +76,15 @@ def build_v0_preshuffle(BM, BN, OCCUPANCY, M, N, K, PRESHUFFLE=True, ILP=True):
             return a + b
 
         def dot(acc, ab):
-            """NI x NJ blocks x two K16 MFMAs per 16 B chunk (same as v0)"""
+            """NI x NJ blocks x two K16 MFMAs per 16 B chunk (same as v0),
+            or one K32 MFMA per 16 B chunk (K32, gfx950)"""
             acc = list(acc)
+            if const_expr(K32):
+                for i in range_constexpr(NI):
+                    for j in range_constexpr(NJ):
+                        acc[i * NJ + j] = rocdl.mfma_f32_16x16x32_bf16(
+                            T.f32x4, [ab[i], ab[NI + j], acc[i * NJ + j], 0, 0, 0])
+                return acc
             a = [v.bitcast(fx.Int16) for v in ab[:NI]]
             b = [v.bitcast(fx.Int16) for v in ab[NI:]]
             for i in range_constexpr(NI):
@@ -86,11 +97,11 @@ def build_v0_preshuffle(BM, BN, OCCUPANCY, M, N, K, PRESHUFFLE=True, ILP=True):
             return acc
 
         def interleave():
-            """the 16 prefetch loads go between the first 16 of the 128 MFMAs"""
+            """the 16 prefetch loads go between the first 16 MFMAs of the K-step"""
             for _ in range_constexpr(NI + NJ):
                 rocdl.sched_mfma(1)
                 rocdl.sched_vmem(1)
-            rocdl.sched_mfma(2 * NA - NI - NJ)
+            rocdl.sched_mfma(NMFMA - NI - NJ)
 
         acc0 = [fx.full(4, 0.0, fx.Float32) for _ in range_constexpr(NA)]
         if const_expr(ILP):
@@ -134,10 +145,13 @@ def build_v0_preshuffle(BM, BN, OCCUPANCY, M, N, K, PRESHUFFLE=True, ILP=True):
 
 
 if __name__ == "__main__":
+    import torch
     from common import test_gemm
     OCCUPANCY = 1
     M = 16*2*256
-    N = 19*2*256
+    N = 16*2*256
     K = 8192
     test_gemm(M, N, K, build_v0_preshuffle(128, 128, OCCUPANCY, M, N, K, PRESHUFFLE=False))
     test_gemm(M, N, K, build_v0_preshuffle(128, 128, OCCUPANCY, M, N, K), prep=preshuffle)
+    if torch.cuda.get_device_properties(0).gcnArchName.startswith("gfx950"):
+        test_gemm(M, N, K, build_v0_preshuffle(128, 128, OCCUPANCY, M, N, K, K32=True), prep=preshuffle)

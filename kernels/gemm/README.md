@@ -710,6 +710,45 @@ def interleave(n_dsrd, n_dswr, n_vmem):
 - **v2**：软件流水重叠了部分访存与 MFMA，比 v1 快约 47%；`rocdl.sched_*` 带来的编译器调度改善使其比 `SCHED=False` 快约 12%。记录中 v2 比 `torch.matmul` 对照快约 2.4%，但后者**输出 BF16、前者输出 FP32**，不能据此比较同精度 GEMM 的优劣。且 [bench.py](bench.py) 输出的“hipBLASLt”是写死的标签，未实际检测 PyTorch 所用 BLAS 后端。若仅按 MI300X 的 2.1 GHz 标称峰值换算，649 TFLOPS 约为 1307 TFLOPS 的一半；没有实测频率，不能推断实际 MFMA 利用率。
 - v1、v2 的 L2/TCC 外部读取与 L2 命中率相近，说明 v2 的加速**主要**来自流水与调度，而不是显著减少这些接口上的流量。
 
+### 4.1 gfx950（MI350X）上和 `torch.matmul` 的差距
+
+在 MI350X（gfx950，256 CU，LDS 160 KB）上，同样的代码离 `torch.matmul` 很远。下表由 [slides/prof_vs_torch.py](slides/prof_vs_torch.py) 采集（[原始数据](slides/data/gfx950_vs_torch.txt)）：8192³，每次用新拷贝的输入，先热身 40 次再取 10 次 dispatch，时间取中位数，计数器取平均。
+
+> 热身次数很重要：连续跑同一个 GEMM，单次时间在前 ~30 次里从约 1100 us 降到约 900 us（torch），之后才稳定。只热身 3 次时，torch 只测得 1049 TFLOPS，比稳定值低 15%。
+
+| | torch（hipBLASLt） | v0_preshuffle | v0_preshuffle `K32` | v2 | v2 `K32` |
+|---|---|---|---|---|---|
+| TFLOPS | **1230** | 763 | 1042 | 756 | 1023 |
+| block × 线程 | 1024 × 256 | 4096 × 64 | 4096 × 64 | 1024 × 256 | 1024 × 256 |
+| LDS | 130 KB | 0 | 0 | 64 KB | 64 KB |
+| 每条 MFMA 的 FLOP | 16384 | 8192 | 16384 | 8192 | 16384 |
+| FLOP / MFMA 忙碌周期 / SIMD | 1022 | 512 | 1024 | 512 | 1024 |
+| MFMA 忙碌 | 87.4% | 84.8% | 69.5% | 81.3% | 67.0% |
+| 计数时主频 | 1387 MHz | 1761 MHz | 1466 MHz | 1791 MHz | 1497 MHz |
+| global load 条数 | 8.4 M | 16.8 M | 16.8 M | 8.4 M | 8.4 M |
+| LDS 读 / 写 | 16.8 M / 0 | 0 / 0 | 0 / 0 | 16.8 M / 8.4 M | 16.8 M / 8.4 M |
+| load 直接写进 LDS 的 wave | 8.4 M（全部） | 0 | 0 | 0 | 0 |
+| TA 忙碌 | 49.5% | 48.4% | **92.2%** | 22.7% | 39.8% |
+| L2 之外读取 | 1.61 GB | 1.63 GB | 1.64 GB | 1.61 GB | 1.61 GB |
+
+几个量的算法：MFMA 忙碌 = `SQ_VALU_MFMA_BUSY_CYCLES` ÷（周期 × 256 CU × 4 SIMD），周期 = `GRBM_GUI_ACTIVE` ÷ 8（8 个 XCD 之和）；主频 = 周期 ÷ 同一次运行的 kernel 时间。用 TFLOPS ≈ 忙碌比例 × 每周期 FLOP × 1024 SIMD × 主频 验算，各列与实测相差 2%–4%，说明这几个换算是自洽的。
+
+**差距分两层。**
+
+1. **MFMA 指令（763 → 1042，+37%）。** gfx950 的 BF16 矩阵吞吐翻倍，靠的是新指令 `v_mfma_f32_16x16x32_bf16`：一条 16 个忙碌周期做 16384 FLOP。老指令 `16x16x16` 仍是 16 周期 8192 FLOP，只有一半速度。v0_preshuffle 和 v2 都还在用老指令，即使 MFMA 忙碌 85% 也只有 763 TFLOPS。每个 lane 的 16 B 本来就是 8 个连续 K，正好是新指令的一份操作数，所以改动只在 `dot()` 里：`build_v0_preshuffle(..., K32=True)`、`build_v2(..., K32=True)`（gfx942 没有这条指令，编译会失败）。torch 也用这条指令（16384 FLOP/条）。
+
+   主频随之下降（1761 → 1466 MHz）：矩阵单元干的活翻倍，碰到功耗墙。这也是 torch 主频最低的原因——它最忙。
+
+2. **喂数据（1042 → 1230，+18%）。** 换了指令后，MFMA 忙碌从 85% 掉到 67%–70%，torch 是 87%。原因在两个 kernel 上不同：
+   - **v0_preshuffle K32：CU 内的访存通路到头（TA 忙碌 92%）。** 每个 block 只有 1 个 wave，自己读自己 128×128 tile 的 A/B，没有 wave 间共享。同样的 FLOP，global load 条数和 L1 访问都是 LDS 版本的 2 倍。原来 MFMA 慢，访存跟得上；MFMA 快一倍后，访存先到头。
+     这不等于 L1/L2 带宽打满。[roofline_101](../../flydsl/roofline_101/README.md) 把 MFMA 去掉、只留同样的 load 做对照：只 load 的版本每 CU 每周期取 43.2 B，v0_preshuffle K32 是 44.0 B，两者每周期速度一样。也就是说，在这种访问模式下 MFMA 的时间已经全部藏在 load 后面，按周期算不会更快了。但同样的 load 全部命中 L1 时，能到每 CU 每周期 60 B（TA 也是约 95% 忙）；v0_preshuffle K32 的 TA 被 L1 反压的时间只有约 7%。所以 TA 忙碌只说明 CU 的访存通路一直有活：每条 1 KB 的 load 要经过 TA → L1 → TD，L1 不命中时还要等 8 个 128 B 的 L2 请求返回。要更快，只能让每个 FLOP 少过几次 L1，也就是 wave 之间通过 LDS 共享数据。同样的 kernel 为什么在 MI300X 上没碰到这个问题，也见 roofline_101。
+   - **v2 K32：TA 只有 40%，但 LDS 中转太重。** v2 和 torch 的 CTA tile 一样（256×256×64，4 wave），LDS 读条数也一样（16.8 M），差别在写：v2 的数据走 global → VGPR → `ds_write`，多出 8.4 M 条 LDS 写；torch 用 `buffer_load ... lds` 直接把数据写进 LDS（"load 直接写进 LDS 的 wave" 正好等于它的全部 load 条数），没有 ds_write，也不占中转 VGPR。§3.8 说过一条 `ds_write_b128` 约 20 周期、一条 MFMA 盖不住；换成 K32 后每个 region 的 MFMA 从 64 条减到 32 条（时长减半），访存条数不变，更盖不住。torch 还有 130 KB LDS，可以多缓几级；v2 只有一份 64 KB。
+   - torch 有 67 M 周期的 LDS bank 冲突，仍然最快，说明这里不是瓶颈。L2 之外读取各列都约 1.6 GB，HBM 远没到上限。
+
+**结论**：在 gfx950 上追 torch 的顺序是：先换 K32 指令（已做，约 1040 TFLOPS，torch 的 85%）；再让数据走 LDS 共享（v2 结构），并用 load 直写 LDS 去掉 ds_write（见 [LDS_101 §7.5](../../flydsl/lds_101.ipynb)）、利用 160 KB LDS 做多级缓冲。这几步正是 hipBLASLt 这个 kernel（`MT256x256x64_MI16x16x1`）的做法。
+
+注意：v0/v2 输出 FP32（256 MB），torch 输出 BF16（128 MB），按约 5 TB/s 估算多写约 25 us，约占时间的 2.5%，不改变上面的结论。
+
 ## 5. 下一步
 
 - **inter_wave**：8 wave/CTA，每 SIMD 2 个 wave 分两组乒乓，一组在 MFMA 上时另一组做访存，把 ds_write 从关键路径上拿掉（参考实现约 99.7% MFMA 效率）。

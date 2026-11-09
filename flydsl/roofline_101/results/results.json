@@ -1,0 +1,169 @@
+{
+ "demand": {
+  "v0p_k16": {
+   "FLOP/clk/CU": 2048,
+   "global B/clk/CU": 32.0,
+   "LDS B/clk/CU": 0
+  },
+  "v2_k16": {
+   "FLOP/clk/CU": 2048,
+   "global B/clk/CU": 16.0,
+   "LDS B/clk/CU": 48.0
+  },
+  "v0p_k32": {
+   "FLOP/clk/CU": 4096,
+   "global B/clk/CU": 64.0,
+   "LDS B/clk/CU": 0
+  },
+  "v2_k32": {
+   "FLOP/clk/CU": 4096,
+   "global B/clk/CU": 32.0,
+   "LDS B/clk/CU": 96.0
+  }
+ },
+ "measured": {
+  "v0p_k16": {
+   "时间 (us)": 1383.1,
+   "主频 (MHz)": 1786,
+   "周期 (M)": 2.47,
+   "TFLOPS": 794.9,
+   "MFMA 忙碌": "84.9%",
+   "TA 忙碌": "54.2%",
+   "TA 被 L1 反压": "2.1%",
+   "global load B/clk/CU": 27.3,
+   "LDS B/clk/CU": 0.0
+  },
+  "v0p_k32": {
+   "时间 (us)": 1006.0,
+   "主频 (MHz)": 1522,
+   "周期 (M)": 1.531,
+   "TFLOPS": 1092.9,
+   "MFMA 忙碌": "68.5%",
+   "TA 忙碌": "94.1%",
+   "TA 被 L1 反压": "7.4%",
+   "global load B/clk/CU": 44.0,
+   "LDS B/clk/CU": 0.0
+  },
+  "v2_k16": {
+   "时间 (us)": 1412.4,
+   "主频 (MHz)": 1820,
+   "周期 (M)": 2.57,
+   "TFLOPS": 778.5,
+   "MFMA 忙碌": "81.6%",
+   "TA 忙碌": "25.4%",
+   "TA 被 L1 反压": "2.0%",
+   "global load B/clk/CU": 13.1,
+   "LDS B/clk/CU": 39.2
+  },
+  "v2_k32": {
+   "时间 (us)": 1019.5,
+   "主频 (MHz)": 1544,
+   "周期 (M)": 1.574,
+   "TFLOPS": 1078.5,
+   "MFMA 忙碌": "66.6%",
+   "TA 忙碌": "42.6%",
+   "TA 被 L1 反压": "4.8%",
+   "global load B/clk/CU": 21.3,
+   "LDS B/clk/CU": 64.0
+  },
+  "load_v0": {
+   "时间 (us)": 706.8,
+   "主频 (MHz)": 2204,
+   "周期 (M)": 1.558,
+   "TA 忙碌": "98.3%",
+   "TA 被 L1 反压": "12.4%",
+   "global load B/clk/CU": 43.2,
+   "LDS B/clk/CU": 0.0
+  },
+  "load_hit": {
+   "时间 (us)": 504.0,
+   "主频 (MHz)": 2216,
+   "周期 (M)": 1.117,
+   "TA 忙碌": "94.8%",
+   "TA 被 L1 反压": "0.0%",
+   "global load B/clk/CU": 60.3,
+   "LDS B/clk/CU": 0.0
+  },
+  "lds_read": {
+   "时间 (us)": 2145.1,
+   "主频 (MHz)": 1785,
+   "周期 (M)": 3.829,
+   "TA 忙碌": "0.0%",
+   "TA 被 L1 反压": "0.0%",
+   "global load B/clk/CU": 0.0,
+   "LDS B/clk/CU": 175.3
+  }
+ },
+ "raw": {
+  "v0p_k16": {
+   "us": 1383.129,
+   "GRBM_GUI_ACTIVE": 19760423.818181816,
+   "SQ_VALU_MFMA_BUSY_CYCLES": 2147483648.0,
+   "TA_TA_BUSY": 342517070.6363636,
+   "SQ_INSTS_VMEM_RD": 16842752.0,
+   "SQ_INSTS_LDS": 0.0,
+   "TA_ADDR_STALLED_BY_TC_CYCLES": 6401507.454545454,
+   "TA_DATA_STALLED_BY_TC_CYCLES": 6581919.0
+  },
+  "v0p_k32": {
+   "us": 1006.035,
+   "GRBM_GUI_ACTIVE": 12250796.545454545,
+   "SQ_VALU_MFMA_BUSY_CYCLES": 1073741824.0,
+   "TA_TA_BUSY": 369002091.72727275,
+   "SQ_INSTS_VMEM_RD": 16842752.0,
+   "SQ_INSTS_LDS": 0.0,
+   "TA_ADDR_STALLED_BY_TC_CYCLES": 20392465.09090909,
+   "TA_DATA_STALLED_BY_TC_CYCLES": 8721328.0
+  },
+  "v2_k16": {
+   "us": 1412.409,
+   "GRBM_GUI_ACTIVE": 20562683.636363637,
+   "SQ_VALU_MFMA_BUSY_CYCLES": 2147483648.0,
+   "TA_TA_BUSY": 167011627.8181818,
+   "SQ_INSTS_VMEM_RD": 8400896.0,
+   "SQ_INSTS_LDS": 25165824.0,
+   "TA_ADDR_STALLED_BY_TC_CYCLES": 5147316.636363637,
+   "TA_DATA_STALLED_BY_TC_CYCLES": 7762111.090909091
+  },
+  "v2_k32": {
+   "us": 1019.516,
+   "GRBM_GUI_ACTIVE": 12589809.272727273,
+   "SQ_VALU_MFMA_BUSY_CYCLES": 1073741824.0,
+   "TA_TA_BUSY": 171660912.27272728,
+   "SQ_INSTS_VMEM_RD": 8388608.0,
+   "SQ_INSTS_LDS": 25165824.0,
+   "TA_ADDR_STALLED_BY_TC_CYCLES": 12922219.363636363,
+   "TA_DATA_STALLED_BY_TC_CYCLES": 6410596.181818182
+  },
+  "load_v0": {
+   "us": 706.785,
+   "GRBM_GUI_ACTIVE": 12462066.909090908,
+   "SQ_VALU_MFMA_BUSY_CYCLES": 0.0,
+   "TA_TA_BUSY": 391908148.8181818,
+   "SQ_INSTS_VMEM_RD": 16842752.0,
+   "SQ_INSTS_LDS": 0.0,
+   "TA_ADDR_STALLED_BY_TC_CYCLES": 49360012.27272727,
+   "TA_DATA_STALLED_BY_TC_CYCLES": 206253.0
+  },
+  "load_hit": {
+   "us": 503.978,
+   "GRBM_GUI_ACTIVE": 8933285.363636363,
+   "SQ_VALU_MFMA_BUSY_CYCLES": 0.0,
+   "TA_TA_BUSY": 271137923.54545456,
+   "SQ_INSTS_VMEM_RD": 16842752.0,
+   "SQ_INSTS_LDS": 0.0,
+   "TA_ADDR_STALLED_BY_TC_CYCLES": 28811.18181818182,
+   "TA_DATA_STALLED_BY_TC_CYCLES": 30324.909090909092
+  },
+  "lds_read": {
+   "us": 2145.114,
+   "GRBM_GUI_ACTIVE": 30631840.09090909,
+   "SQ_VALU_MFMA_BUSY_CYCLES": 0.0,
+   "TA_TA_BUSY": 454277.0909090909,
+   "SQ_INSTS_VMEM_RD": 0.0,
+   "SQ_INSTS_LDS": 167772160.0,
+   "TA_ADDR_STALLED_BY_TC_CYCLES": 0.0,
+   "TA_DATA_STALLED_BY_TC_CYCLES": 56906.0
+  }
+ }
+}

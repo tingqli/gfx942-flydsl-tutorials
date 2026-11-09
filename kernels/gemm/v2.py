@@ -6,7 +6,7 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 
-def build_v2(BM, BN, OCCUPANCY, M, N, K, SCHED=True):
+def build_v2(BM, BN, OCCUPANCY, M, N, K, SCHED=True, K32=False):
     """v1 + software pipeline, following gfx950-gluon-tutorials gfx942/intra_wave.
 
     CTA tile 256x256x64, 4 waves (1 per SIMD). A is split along M into A_top /
@@ -24,6 +24,9 @@ def build_v2(BM, BN, OCCUPANCY, M, N, K, SCHED=True):
     region after its last read and read one region after its rewrite, so a
     single LDS stage suffices; two barriers per K-step (after regions 1 and 3)
     order every cross-wave read/write pair.
+
+    K32=True (gfx950 only): one v_mfma_f32_16x16x32_bf16 per 16 B operand
+    instead of two 16x16x16, so a region has 32 MFMAs (README §4.1).
     """
     assert (BM, BN) == (256, 256)
     BK = 64
@@ -82,8 +85,15 @@ def build_v2(BM, BN, OCCUPANCY, M, N, K, SCHED=True):
                     for s in range_constexpr(2) for i in range_constexpr(NI)]
 
         def dot(acc, a_op, b_op):
-            """DOT: 64 MFMAs (4x4 blocks x K=64) on one quadrant slice"""
+            """DOT: 64 MFMAs (4x4 blocks x K=64) on one quadrant slice (32 with K32)"""
             acc = list(acc)
+            if const_expr(K32):
+                for s in range_constexpr(2):
+                    for i in range_constexpr(NI):
+                        for j in range_constexpr(NJ):
+                            acc[i * NJ + j] = rocdl.mfma_f32_16x16x32_bf16(
+                                T.f32x4, [a_op[s * NI + i], b_op[s * NJ + j], acc[i * NJ + j], 0, 0, 0])
+                return acc
             for s in range_constexpr(2):
                 for i in range_constexpr(NI):
                     a = a_op[s * NI + i].bitcast(fx.Int16)
@@ -109,7 +119,7 @@ def build_v2(BM, BN, OCCUPANCY, M, N, K, SCHED=True):
                 for _ in range_constexpr(n_vmem):
                     rocdl.sched_mfma(1)
                     rocdl.sched_vmem(1)
-                rocdl.sched_mfma(64 - 2 * n_dsrd - 2 * n_dswr - n_vmem)
+                rocdl.sched_mfma((32 if K32 else 64) - 2 * n_dsrd - 2 * n_dswr - n_vmem)
 
         # ---- prologue: tile 0 -> LDS, tile 1 -> registers, prime a_top / b_left
         lw(lds_b, 0, gr(B, 0, fx.Int32(0)))
